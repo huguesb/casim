@@ -1,0 +1,95 @@
+<html>
+<head>
+<title>CMU 15-418 (Spring 2012) Final Project Proposal</title>
+
+<link rel="stylesheet" type="text/css" href="style.css">
+
+</head>
+<body>
+
+<div class="constrainedWidth">
+  
+<div style="padding-bottom: 10px;">
+<div class="title smallTitle">Project Proposal:</div>
+<div class="title" style="width: 900px; padding-bottom: 6px; border-bottom: #000000 2px solid;">
+  Fast key-value store on GPU
+</div>
+</div>
+
+<div class="boldText">
+<div>Hugues Bruant &lt;<a href="mailto:hugues.bruant@gmail.com">hugues.bruant@gmail.com</a>&gt;</div>
+</div>
+
+<div style="padding-top: 1em;"><a href="index.html">Main Project Page</a></div>
+
+<div class="section">Summary</div>
+<p>The goal of this project is to implement a fast key-value store in GPU memory 
+based on a (possibly modified) b-tree data structure.</p>
+
+<div class="section">Background</div>
+<p>Key-value data stores are an essential part of many applications and they have 
+recently been brough back under the spotlight by the NoSQL movement.</p>
+<p>The b-tree is an old but very interesting data structure which was originally
+developed to reduce the amount of disk traffic back when main memory was a very
+scarce resource. Since then it has been the focus of much research and many variants
+have been designed, some focused on cache access patterns, others on concurrency, ...</p>
+<p>However, despite the hunt for ever more scalability in databases, there have been
+relatively little work on using this venerable data structure in a GPGPU setting.
+I intend to remedy to this sad state of affairs and implement a fast key-value store
+that will achieve significant speedup by processing queries in batches.</p>
+
+<div class="section">Challenge</div>
+<p>Like all tree structures, the b-tree present many challenges for effective
+GPU parallelization as it involves significant indirection as well as conditional
+control flow. In addition, there is potential for high contention during tree
+rebalancing.</p>
+<p>The hope here is that the complexity of implementing insertion and removal will
+be largely offset by the gains from the lookups.</p>
+
+<div class="section">Resources</div>
+<p>I will do most of the prototyping on my laptop, using a venerable GeForce 9500M GS 
+(Compute 1.1) and performance testing on the GTX 480 of the Gates cluster. This way
+I will have a solution that is able to take advantage of commodity hardware and
+performance figures that can be compared to typical research papers on GPGPU.</p>
+<p>All the work will be done from scratch.</p>
+
+<div class="section">Goals/Deliverables</div>
+<ul>
+    <li>Design a variant of the b-tree structure that is suitable for use on a GPU
+    <li>Implement it using CUDA (75% goal : read-only structure)
+    <li>Create some benchmarks that demonstrate the strength and weaknesses of this
+    data structure
+    <li><b>[stretch]</b>Match (or exceed) the throughput of state-of-the-art implementations
+    of similar data structures
+    <li><b>[stretch]</b>Come up with a cool demo
+    <li><b>[stretch]</b>Wrap the code in a nice library and Open Source it
+</ul>
+
+<div class="section">Platform</div>
+<p>High throughput key-value stores are a cornerstone of many "Big Data" applications.
+People have gone to great length to optimize such data structures first using SIMD,
+then multiple cores and finally multiple nodes in a network. Leveraring the power of
+GPUs could lead to significant improvement in the scalability for a fairly modest
+cost.</p>
+
+<div class="section">Proposed Schedule</div>
+
+<p>
+<table class="projectSchedule">
+<tr>
+  <td width="110"><span style="font-weight: bold;">Week</span></td>
+  <td width="380"><span style="font-weight: bold;">What I Plan To Do</span></td>
+</tr>
+<tr><td>Apr 1-7</td><td>Papers reading, notebook scribbling</td></tr>
+<tr><td>Apr 8-14</td><td>More scribbling, initial prototyping</td></tr>
+<tr><td>Apr 15-21</td><td>Implementation, tests and benchmarks</td></tr>
+<tr><td>Apr 22-28</td><td>Implementation, tests and benchmarks</td></tr>
+<tr><td>Apr 29-May 5</td><td>Performance tuning</td></tr>
+<tr><td>May 6-11</td><td>Write up results</td></tr>
+</table>
+</p>
+
+</div>
+
+</body>
+</html>
