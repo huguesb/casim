@@ -12,7 +12,7 @@
 <div style="padding-bottom: 10px;">
 <div class="title smallTitle">Project Proposal:</div>
 <div class="title" style="width: 900px; padding-bottom: 6px; border-bottom: #000000 2px solid;">
-  Fast key-value store on GPU
+  Parallel simulation of cellular automata
 </div>
 </div>
 
@@ -23,54 +23,61 @@
 <div style="padding-top: 1em;"><a href="index.html">Main Project Page</a></div>
 
 <div class="section">Summary</div>
-<p>The goal of this project is to implement a fast key-value store in GPU memory 
-based on a (possibly modified) b-tree data structure.</p>
+<p>The goal of this project is to implement fast simulation algorithms for cellular
+automata on parallel hardware.</p>
 
 <div class="section">Background</div>
-<p>Key-value data stores are an essential part of many applications and they have 
-recently been brough back under the spotlight by the NoSQL movement.</p>
-<p>The b-tree is an old but very interesting data structure which was originally
-developed to reduce the amount of disk traffic back when main memory was a very
-scarce resource. Since then it has been the focus of much research and many variants
-have been designed, some focused on cache access patterns, others on concurrency, ...</p>
-<p>However, despite the hunt for ever more scalability in databases, there have been
-relatively little work on using this venerable data structure in a GPGPU setting.
-I intend to remedy to this sad state of affairs and implement a fast key-value store
-that will achieve significant speedup by processing queries in batches.</p>
+<p>Although cellular automata are best known through examples such as Conway's
+Game of Life, they have a lot of practical uses in physical modelling. They are
+for instance used to simulate lava flow or the deformation of complex surfaces.</p>
+<p>In the most common model, the state of all cells change synchronously and the
+new state of each cell only depend of the previous state of its neighbors, making
+the naive simulation algorithm embarassingly parallel. More elaborate simulation
+algorithms allow significant performance improvements but are harder to efficiently
+parallelize.</p>
 
 <div class="section">Challenge</div>
-<p>Like all tree structures, the b-tree present many challenges for effective
-GPU parallelization as it involves significant indirection as well as conditional
-control flow. In addition, there is potential for high contention during tree
-rebalancing.</p>
-<p>The hope here is that the complexity of implementing insertion and removal will
-be largely offset by the gains from the lookups.</p>
+<p>Although the naive simulation is embarassingly parallel, it is also embarassingly
+inefficient, usually doing a lot of unnecessary work. On the other hand, the more
+elaborate algorithms typically rely on data structures that are not designed with
+parallelism in mind. Striking the best balance between these two extremes will be
+key to achieving high performance.</p>
+<p>Cellular automata encompass a very large landscape, from Conway's Game of
+Life, in which each cell has two possible states and the transition function is
+as simple as counting neighbors, to complicated lava simulation models where
+each cell has five scalar values and evolution follows complex numerical equations.
+While it would be impossible to support all cases efficiently, the implementation
+should strive to accommodate a large variety of CA and simulate each of them as
+efficiently as possible.</p>
+<p>Recent GPU have large amounts of memory but there is only so much room
+in a single chip. While cellular-automata models probably don't come close to
+the terabytes of data produced by the LHC, many scientific simulations are bound
+to need more than a mere 1Gb of RAM. A challenging strech goal would be to
+distribute the work accross multiple GPU-equiped workstations through MPI.</p>
 
 <div class="section">Resources</div>
-<p>I will do most of the prototyping on my laptop, using a venerable GeForce 9500M GS 
-(Compute 1.1) and performance testing on the GTX 480 of the Gates cluster. This way
-I will have a solution that is able to take advantage of commodity hardware and
-performance figures that can be compared to typical research papers on GPGPU.</p>
 <p>All the work will be done from scratch.</p>
+<p>I will do most of the prototyping on my laptop, using a venerable GeForce 9500M GS 
+(Compute 1.1) and performance testing on the GTX 480 of the Gates cluster.</p>
 
 <div class="section">Goals/Deliverables</div>
 <ul>
-    <li>Design a variant of the b-tree structure that is suitable for use on a GPU
-    <li>Implement it using CUDA (75% goal : read-only structure)
-    <li>Create some benchmarks that demonstrate the strength and weaknesses of this
-    data structure
-    <li><b>[stretch]</b>Match (or exceed) the throughput of state-of-the-art implementations
-    of similar data structures
-    <li><b>[stretch]</b>Come up with a cool demo
-    <li><b>[stretch]</b>Wrap the code in a nice library and Open Source it
+    <li>Implement one or more CA simulation algorithms using CUDA
+    <li>Create some benchmarks that show the strength and weakness of this (these)
+    algorithm(s)
+    <li><b>[stretch]</b>Implement a multi-GPU variant of these algorithms, using
+    MPI to distribute the work accross multiple machines.
+    <li><b>[stretch]</b>Implement an FPGA-based variant of these algorithms
+    <li><b>[stretch]</b>Come up with a cool (visual) demo
 </ul>
 
 <div class="section">Platform</div>
-<p>High throughput key-value stores are a cornerstone of many "Big Data" applications.
-People have gone to great length to optimize such data structures first using SIMD,
-then multiple cores and finally multiple nodes in a network. Leveraring the power of
-GPUs could lead to significant improvement in the scalability for a fairly modest
-cost.</p>
+<p>Scientific computing is always eager for more performance and therefore
+often on the frontline. It started using distributed computing before it was
+cool and pretty much started the whole GPGPU movement.</p>
+<p>If I have enough time and manage to get my hands on an FPGA, I would also
+like to implement CA simulation on this platform and compare its strength and
+weaknesses to that of GPGPU.</p>
 
 <div class="section">Proposed Schedule</div>
 
