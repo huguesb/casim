@@ -66,6 +66,14 @@ bool PGM::load(const char *file) {
     }
     m_white = tmp;
     
+    int c = fgetc(f);
+    if (c != ' ' && c != '\n' && c != '\r' && c != '\t') {
+        fprintf(stderr, "Invalid PGM file (missing header/data separator): %s\n", file);
+        m_width = 0;
+        m_height = 0;
+        return false;
+    }
+    
     m_data = (uint8_t*)realloc(m_data, m_width * m_height);
     
     n = fread(m_data, sizeof(uint8_t), m_width * m_height, f);
