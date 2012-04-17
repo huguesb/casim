@@ -32,8 +32,11 @@ private:
             WireWorld
         };
         
+        void parse(const char *s);
+        const char* toString() const;
+        
         unsigned short type;
-        uint8_t B, S; // parameters for Life-like
+        uint16_t B, S; // parameters for Life-like
     };
     
     Rule rule;

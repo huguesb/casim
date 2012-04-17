@@ -34,12 +34,74 @@ struct CAParams {
 
 __constant__ CAParams caParams;
 
+////////////////////////////////////////////////////////////////////////////////
+
+// naive, embarassingly parallel CA update
+__global__ void kernelCAUpdateNaive(uint8_t *in, uint8_t *out) {
+    const uint8_t B = caParams.B;
+    const uint8_t S = caParams.S;
+    
+    
+}
+
+// more sophisticated worklist-based approach
+// may or may not be faster depending on the state
+__global__ void kernelCAUpdateWorkList() {
+
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void CASim::Rule::parse(const char *s) {
+    bool ok = false;
+    if (!strcmp(s, "wire")) {
+        type = WireWorld;
+        ok = true;
+    } else if (s[0] == 'B') {
+        // B[1-8]+S[0-8]+
+        type = LifeLike;
+        B = 0;
+        S = 0;
+        int i = 1;
+        while (s[i] >= '1' && s[i] <= '8')
+            B |= (1 << (s[i++] - '0'));
+        if (s[i] == 'S') {
+            ++i;
+            while (s[i] >= '1' && s[i] <= '8')
+                S |= (1 << (s[i++] - '0'));
+            ok = s[i] == '\0';
+        }
+    }
+    
+    if (!ok) {
+        fprintf(stderr, "Invalid rule, falling back to Life\n");
+        type = Rule::LifeLike;
+        B = 1 << 3;
+        S = (1 << 2) | (1 << 3);
+    }
+}
+
+const char* CASim::Rule::toString() const {
+    static char buffer[20];
+    if (type == WireWorld)
+        return "wire";
+    char *p = buffer;
+    *p++ = 'B';
+    for (int i = 1; i <= 8; ++i)
+        if (B & (1 << i))
+            *p++ = '0' + i;
+    *p++ = 'S';
+    for (int i = 0; i <= 8; ++i)
+        if (S & (1 << i))
+            *p++ = '0' + i;
+    *p = '\0';
+    return buffer;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 
 CASim::CASim(const char *rule) {
-    // TODO: parse rule
-    //rule.type = ;
-    // rule.B = ;
-    // rule.S = ;
+    this->rule.parse(rule);
     
     generation = 0;
     width = height = 0;
@@ -48,7 +110,7 @@ CASim::CASim(const char *rule) {
     int deviceCount = 0;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
 
-    printf("Initializing CUDA for CudaRenderer\n");
+    printf("Initializing CUDA for CASim\n");
     printf("Found %d CUDA devices\n", deviceCount);
 
     for (int i=0; i<deviceCount; i++) {
@@ -67,6 +129,8 @@ CASim::~CASim() {
 }
 
 void CASim::step(int n) {
+    fprintf(stderr, "Running %i steps of %s\n", n, rule.toString());
+    
     for (int i = 0; i < n; ++i) {
         // TODO : kernel launch
         ++generation;
