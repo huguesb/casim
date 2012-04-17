@@ -14,6 +14,8 @@
 
 #include <stdint.h>
 
+#include <map>
+
 class PGM {
 public:
     PGM();
@@ -23,6 +25,8 @@ public:
     
     bool load(const char *file);
     bool save(const char *file);
+    
+    void recode(const std::map<uint8_t, uint8_t>& m);
     
     unsigned int width() const;
     unsigned int height() const;

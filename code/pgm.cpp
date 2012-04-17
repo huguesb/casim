@@ -86,11 +86,33 @@ bool PGM::save(const char *file) {
         fprintf(stderr, "Unable to open %s for writing.\n", file);
         return false;
     }
-    if (fprintf(f, "P5\n%u\n%u\n%u\n", m_width, m_height, m_white))
+    if (fprintf(f, "P5\n%u %u\n%u\n", m_width, m_height, m_white) <= 0) {
+        fprintf(stderr, "Unable to write PGM header.\n");
         return false;
-    if (fwrite(m_data, sizeof(uint8_t), 2, f))
+    }
+    size_t sz = (size_t)m_width * (size_t)m_height;
+    if (fwrite(m_data, sizeof(uint8_t), sz, f) != sz) {
+        fprintf(stderr, "Unable to write PGM data.\n");
         return false;
+    }
     return true;
+}
+
+void PGM::recode(const std::map<uint8_t, uint8_t>& m) {
+    std::map<uint8_t, uint8_t>::const_iterator it, end = m.end();
+    unsigned long n = (unsigned long)m_width * (unsigned long)m_height;
+    uint8_t *p = m_data;
+    while (n) {
+        uint8_t v = *p;
+        it = m.find(v);
+        if (it != end)
+            *p = it->second;
+        ++p;
+        --n;
+    }
+    it = m.find(m_white);
+    if (it != end)
+        m_white = it->second;
 }
 
 unsigned int PGM::width() const {
