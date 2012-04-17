@@ -13,6 +13,9 @@
 #define CA_SIM_H
 
 #include <stdint.h>
+#include <stdlib.h>
+
+struct CARule;
 
 class CASim {
 public:
@@ -26,25 +29,14 @@ public:
     void step(int n);
     
 private:
-    struct Rule {
-        enum Type {
-            LifeLike,
-            WireWorld
-        };
-        
-        void parse(const char *s);
-        const char* toString() const;
-        
-        unsigned short type;
-        uint16_t B, S; // parameters for Life-like
-    };
-    
-    Rule rule;
+    CARule *rule;
     unsigned int generation;
     unsigned int width;
     unsigned int height;
+    size_t pitch0;
+    size_t pitch1;
     uint8_t *cell0;
-    uint8_t *cell1; 
+    uint8_t *cell1;
 };
 
 #endif  // CA_SIM_H
