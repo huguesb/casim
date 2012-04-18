@@ -389,12 +389,17 @@ CASim::~CASim() {
     if (workOffset) cudaFree(workOffset);
 }
 
+static int cmp(const void *a, const void *b) {
+    int diff = *((const int*)a) - *((const int*)b);
+    return diff ? diff : ((const int*)a)[1] - ((const int*)b)[1];
+}
+
 void CASim::step(int n) {
     fprintf(stderr, "Running %i steps of %s\n", n, rule->toString());
     double ref = CycleTimer::currentSeconds();
     
-    uint32_t *mcells;
-    uint32_t wAmount;
+    uint64_t *mwork = 0;
+    uint32_t wAmount, wAlloc = 0;
     cudaMemcpy(&wAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
     thrust::device_ptr<uint64_t> wit1(reinterpret_cast<uint64_t*>(work1));
     thrust::device_ptr<uint64_t> wit0(reinterpret_cast<uint64_t*>(work0));
@@ -446,23 +451,72 @@ void CASim::step(int n) {
         uint32_t wNext;
         cudaMemcpy(&wNext, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
         
-        // sort worklist
-        thrust::sort(wit1, wit1 + wNext);
+        if (!wNext) {
+            fprintf(stderr, "Reached still life\n");
+            break;
+        }
         
-//         fprintf(stderr, "%u macrocells scheduled for update\n", wNext);
-//         mcells = new uint32_t[2*wNext];
-//         cudaMemcpy(mcells, work1, 2*wNext*sizeof(uint32_t), cudaMemcpyDeviceToHost);
-//         for (int i = 0; i < wNext; ++i)
-//             fprintf(stderr, "  %u:%u\n", mcells[2*i+0], mcells[2*i+1]);
-//         delete[] mcells;
+        // TODO: find best empirical threshold
+        const uint32_t threshold = 1024;
         
-        // remove duplicates
-        wAmount = thrust::unique_copy(wit1, wit1 + wNext, wit0) - wit0;
-        
+        if (wNext < threshold) {
+            // too small : no point doing the sort and duplicate removal on GPU
+            if (wNext > wAlloc) {
+                wAlloc = wNext;
+                mwork = (uint64_t*)realloc(mwork, wAlloc * sizeof(uint64_t));
+            }
+            cudaMemcpy(mwork, work1, wNext * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+            
+//             fprintf(stderr, "> %u\n", wNext);
+//             for (int i = 0; i < wNext; ++i)
+//                 fprintf(stderr, "  %u:%u\n",
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+            
+            // sort worklist
+            qsort(mwork, wNext, sizeof(uint64_t), cmp);
+            
+//             fprintf(stderr, "< %u\n", wNext);
+//             for (int i = 0; i < wNext; ++i)
+//                 fprintf(stderr, "  %u:%u\n",
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+            
+            // remove duplicates
+            uint64_t last = *mwork;
+            uint64_t *h = mwork, *q = mwork+1, *e = mwork + wNext;
+            while (++h != e) {
+                uint64_t cur = *h;
+                if (cur != last) {
+                    last = cur;
+                    if (q != h)
+                        *q = cur;
+                    ++q;
+                }
+            }
+            
+            wNext = q - mwork;
+            
+//             fprintf(stderr, "< %u\n", wNext);
+//             for (int i = 0; i < wNext; ++i)
+//                 fprintf(stderr, "  %u:%u\n",
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+            
+            cudaMemcpy(work0, mwork, wNext * sizeof(uint64_t), cudaMemcpyHostToDevice);
+            wAmount = wNext;
+        } else {
+            // sort worklist
+            thrust::sort(wit1, wit1 + wNext);
+            // remove duplicates
+            wAmount = thrust::unique_copy(wit1, wit1 + wNext, wit0) - wit0;
+        }
 #endif
         ++generation;
         cudaDeviceSynchronize();
     }
+    
+    free(mwork);
     
     double end = CycleTimer::currentSeconds();
     fprintf(stderr, "Elapsed : %lf ms (%lf / step)\n",
