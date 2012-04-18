@@ -38,12 +38,11 @@ struct CARule {
 
 struct CAParams {
     unsigned short type;
-    uint8_t B, S;
+    uint16_t B, S;
     
     unsigned int width;
     unsigned int height;
-    uint8_t *cell0;
-    uint8_t *cell1;
+    unsigned int *workOffset;
 };
 
 __constant__ CAParams caParams;
@@ -169,14 +168,14 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
 // naive, embarassingly parallel CA update
 template <uint16_t T>
 __global__ void kernelCAUpdateNaive(uint8_t *in,  uint8_t *out, size_t pitch) {
+    __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
     
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
+    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
     
     uint8_t *ip = in + row * pitch + col * 4;
     
     // cooperative load of relevant old cell values to shared memory
-    __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
     uint8_t *sp = ocells + (threadIdx.y+1) * (kMacroCellWidth+8) + (threadIdx.x+1) * 4;
     
     uint32_t mid = loadCells(row, col, sp, ip, pitch);
@@ -193,25 +192,38 @@ __global__ void kernelCAUpdateNaive(uint8_t *in,  uint8_t *out, size_t pitch) {
     *reinterpret_cast<uint32_t*>(op) = nval;
 }
 
+// fill initial worklist (all cells to be updated)
+__global__ void kernelInitWorklist(uint32_t *work, size_t n) {
+    const unsigned int w = caParams.width;
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n)
+        return;
+    work[2*idx+0] = (idx / w) * kMacroCellHeight;
+    work[2*idx+1] = (idx % w) * kMacroCellWidth;
+}
+
 // more sophisticated worklist-based approach
 // may or may not be faster depending on the state
 template <uint16_t T>
-__global__ void kernelCAUpdateWorkList(uint32_t *iworklist, uint32_t *oworklist,
+__global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
                                        uint8_t *in, uint8_t *out, size_t pitch) {
-    // derive row/col from worklist
-    unsigned int item = blockIdx.x * blockDim.x + threadIdx.x;
+    __shared__ int update[9];
+    __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
     
-    int row = iworklist[2*item+0];
-    int col = iworklist[2*item+1];
+    // derive row/col from worklist
+    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    uint32_t row = iwork[2*idx+0] + threadIdx.y;
+    uint32_t col = iwork[2*idx+1] + threadIdx.x;
     
     uint8_t *ip = in + row * pitch + col * 4;
     
     // cooperative load of relevant old cell values to shared memory
-    __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
     uint8_t *sp = ocells + (threadIdx.y+1) * (kMacroCellWidth+8) + (threadIdx.x+1) * 4;
     
     uint32_t mid = loadCells(row, col, sp, ip, pitch);
     
+    // wait for shared array to be fully initialized
     __syncthreads();
     
     if (row >= caParams.height || col >= caParams.width)
@@ -224,7 +236,6 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iworklist, uint32_t *oworklist,
     // determine modification
     uint32_t mod = mid ^ nval;
     
-    __shared__ int update[9];
     if (mod) {
         // only one thread will successfully write, doesn't matter which one
         update[4] = 1;
@@ -250,12 +261,25 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iworklist, uint32_t *oworklist,
         }
     }
     
-    __syncthreads();
-    
-    // cooperatively update worklist
-    if (threadIdx.y * blockDim.x + threadIdx.x < 9) {
-        // TODO:
-    }
+//     __syncthreads();
+//     
+//     if (threadIdx.x == 0) {
+//         int count = update[0] + update[1] + update[2] +
+//                     update[3] + update[4] + update[5] + 
+//                     update[6] + update[7] + update[8];
+//         unsigned int offset = atomicAdd(caParams.workOffset, count);
+//         uint32_t *ow = owork + 2*offset;
+//         
+//         if (update[0]) { ow[0] = row-1; ow[1] = col-1; ow += 2; }
+//         if (update[1]) { ow[0] = row-1; ow[1] = col;   ow += 2; }
+//         if (update[2]) { ow[0] = row-1; ow[1] = col+1; ow += 2; }
+//         if (update[3]) { ow[0] = row;   ow[1] = col-1; ow += 2; }
+//         if (update[4]) { ow[0] = row;   ow[1] = col  ; ow += 2; }
+//         if (update[5]) { ow[0] = row;   ow[1] = col;   ow += 2; }
+//         if (update[6]) { ow[0] = row+1; ow[1] = col-1; ow += 2; }
+//         if (update[7]) { ow[0] = row+1; ow[1] = col;   ow += 2; }
+//         if (update[8]) { ow[0] = row+1; ow[1] = col+1; }
+//     }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -314,6 +338,8 @@ CASim::CASim(const char *rule) {
     generation = 0;
     width = height = 0;
     cell0 = cell1 = 0;
+    work0 = work1 = 0;
+    workOffset = 0;
     
     int deviceCount = 0;
     cudaError_t err = cudaGetDeviceCount(&deviceCount);
@@ -334,6 +360,9 @@ CASim::CASim(const char *rule) {
 CASim::~CASim() {
     if (cell0) cudaFree(cell0);
     if (cell1) cudaFree(cell1);
+    if (work0) cudaFree(work0);
+    if (work1) cudaFree(work1);
+    if (workOffset) cudaFree(workOffset);
 }
 
 void CASim::step(int n) {
@@ -341,22 +370,56 @@ void CASim::step(int n) {
     double ref = CycleTimer::currentSeconds();
     
     for (int i = 0; i < n; ++i) {
+        uint8_t *scell = (generation & 1) ? cell1 : cell0;
+        uint8_t *dcell = (generation & 1) ? cell0 : cell1;
+        
+#if 0
         dim3 updateBlockDim(kMacroCellWidth / 4, kMacroCellHeight, 1);
         dim3 updateGridDim((width / 4 + updateBlockDim.x - 1) / updateBlockDim.x,
                            (height + updateBlockDim.y - 1) / updateBlockDim.y);
         
-        uint8_t *src = (generation & 1) ? cell1 : cell0;
-        uint8_t *dst = (generation & 1) ? cell0 : cell1;
-        
         if (rule->type == CARule::WireWorld)
             kernelCAUpdateNaive<CARule::WireWorld><<<updateGridDim, updateBlockDim>>>(
-                src + pitch, dst + pitch, pitch);
+                scell + pitch, dcell + pitch, pitch);
         else
             kernelCAUpdateNaive<CARule::LifeLike><<<updateGridDim, updateBlockDim>>>(
-                src + pitch, dst + pitch, pitch);
+                scell + pitch, dcell + pitch, pitch);
+        
+#else
+        uint32_t workAmount;
+        cudaMemcpy(&workAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        cudaDeviceSynchronize();
+        
+        fprintf(stderr, "updating %u macrocells\n", workAmount);
+        
+        dim3 updateBlockDim(kMacroCellWidth / 4, kMacroCellHeight, 1);
+        dim3 updateGridDim(workAmount, 1);
+        
+        cudaMemset(workOffset, 0, sizeof(uint32_t));
+        cudaDeviceSynchronize();
+        
+        
+        if (rule->type == CARule::WireWorld)
+            kernelCAUpdateWorkList<CARule::WireWorld><<<updateGridDim, updateBlockDim>>>(
+                work0, work1, scell + pitch, dcell + pitch, pitch);
+        else
+            kernelCAUpdateWorkList<CARule::LifeLike><<<updateGridDim, updateBlockDim>>>(
+                work0, work1, scell + pitch, dcell + pitch, pitch);
         
         cudaDeviceSynchronize();
+        
+        cudaMemcpy(&workAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "%u macrocells scheduled for update\n", workAmount);
+        
+        // TODO: sort work1
+        thrust::device_ptr<uint64_t> wit(reinterpret_cast<uint64_t*>(work1));
+        thrust::stable_sort(wit, wit + workAmount);
+        
+        // TODO: filter work0 into work1
+        
+#endif
         ++generation;
+        cudaDeviceSynchronize();
     }
     
     double end = CycleTimer::currentSeconds();
@@ -376,11 +439,17 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     
     if (cell0) cudaFree(cell0);
     if (cell1) cudaFree(cell1);
+    if (work0) cudaFree(work0);
+    if (work1) cudaFree(work1);
+    
+    double tmp, ref = CycleTimer::currentSeconds();
     
     this->width = width;
     this->height = height;
     
     generation = 0;
+    
+    cudaError_t err;
     
     // Alloc double buffers
     // buffers are padded as follows to simplify kernels :
@@ -391,8 +460,22 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     if (wpad)
         wpad = 16 - wpad;
     size_t pitch0, pitch1;
-    cudaMallocPitch(&cell0, &pitch0, width + wpad, height+2);
-    cudaMallocPitch(&cell1, &pitch1, width + wpad, height+2);
+    err = cudaMallocPitch(&cell0, &pitch0, width + wpad, height+2);
+    if (err) { fprintf(stderr, "Unable to allocate buffer\n"); return false; }
+    err = cudaMallocPitch(&cell1, &pitch1, width + wpad, height+2);
+    if (err) { fprintf(stderr, "Unable to allocate buffer\n"); return false; }
+    
+    // alloc worklists
+    uint32_t wh = ((width + 15) / 16) * ((height + 15) / 16);
+    err = cudaMalloc(&work0, wh * 2 * sizeof(uint32_t));
+    if (err) { fprintf(stderr, "Unable to allocate worklist\n"); return false; }
+    err = cudaMalloc(&work1, wh * 9 * 2 * sizeof(uint32_t));
+    if (err) { fprintf(stderr, "Unable to allocate worklist\n"); return false; }
+    if (!workOffset)
+        cudaMalloc(&workOffset, sizeof(uint32_t));
+    
+    tmp = CycleTimer::currentSeconds();
+    fprintf(stderr, "Alloc buffers : %lf ms\n", (tmp - ref)*1000.0);
     
     if (pitch0 != pitch1) {
         fprintf(stderr, "Pitch mismatch\n");
@@ -402,13 +485,12 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     
     // set global CA params
     CAParams params;
-    params.width = width;
-    params.height = height;
     params.type = rule->type;
     params.B = rule->B;
     params.S = rule->S;
-    params.cell0 = cell0;
-    params.cell1 = cell1;
+    params.width = width;
+    params.height = height;
+    params.workOffset = workOffset;
     cudaMemcpyToSymbol(caParams, &params, sizeof(CAParams));
     
     // copy initial state to first buffer
@@ -430,6 +512,18 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
 //         }
         cudaMemset2D(cell0+width, pitch, 0, wpad, height+2);
     }
+    
+    
+    // prepare initial worklist
+    dim3 blockDim(128, 1);
+    dim3 gridDim((wh + 127) / 128, 1);
+    kernelInitWorklist<<<gridDim, blockDim>>>(work0, wh);
+    cudaMemcpy(workOffset, &wh, sizeof(uint32_t), cudaMemcpyHostToDevice);
+    
+    cudaDeviceSynchronize();
+    
+    double end = CycleTimer::currentSeconds();
+    fprintf(stderr, "Initialized CA in %lf ms\n", (end - ref)*1000.0);
     
     return true;
 }

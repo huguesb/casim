@@ -36,8 +36,9 @@ private:
     size_t pitch;
     uint8_t *cell0;
     uint8_t *cell1;
-    uint32_t *worklist0;
-    uint32_t *worklist1;
+    uint32_t *work0;
+    uint32_t *work1;
+    uint32_t *workOffset;
 };
 
 #endif  // CA_SIM_H
