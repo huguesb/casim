@@ -280,10 +280,12 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
     
     __syncthreads();
     
+    unsigned int cmod = update[4];
+    
     // fill worklist based on mod flags
-    if (tidx == 0 && update[4]) {
+    if (tidx == 0 && cmod) {
         unsigned int count = update[0] + update[1] + update[2] +
-                             update[3] + update[4] + update[5] + 
+                             update[3] + cmod      + update[5] + 
                              update[6] + update[7] + update[8];
         
         unsigned int offset = atomicAdd(caParams.workOffset, count);
@@ -296,7 +298,7 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
             if (update[2] && !lastCol)  { ow[0] = row-kMacroCellHeight; ow[1] = col+kMacroCellWidth/4; ow += 2; }
         }
         if (update[3] && col)           { ow[0] = row;                  ow[1] = col-kMacroCellWidth/4; ow += 2; }
-        if (update[4])                  { ow[0] = row;                  ow[1] = col;                   ow += 2; }
+        if (cmod)                       { ow[0] = row;                  ow[1] = col;                   ow += 2; }
         if (update[5] && !lastCol)      { ow[0] = row;                  ow[1] = col+kMacroCellWidth/4; ow += 2; }
         if (!lastRow) {
             if (update[6] && col)       { ow[0] = row+kMacroCellHeight; ow[1] = col-kMacroCellWidth/4; ow += 2; }
@@ -461,26 +463,18 @@ void CASim::step(int n) {
         
         if (wNext < threshold) {
             // too small : no point doing the sort and duplicate removal on GPU
+            
+            // make sure the CPU-side worklist buffer is large enough
             if (wNext > wAlloc) {
                 wAlloc = wNext;
                 mwork = (uint64_t*)realloc(mwork, wAlloc * sizeof(uint64_t));
             }
-            cudaMemcpy(mwork, work1, wNext * sizeof(uint64_t), cudaMemcpyDeviceToHost);
             
-//             fprintf(stderr, "> %u\n", wNext);
-//             for (int i = 0; i < wNext; ++i)
-//                 fprintf(stderr, "  %u:%u\n",
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+            // copy worklist from GPU
+            cudaMemcpy(mwork, work1, wNext * sizeof(uint64_t), cudaMemcpyDeviceToHost);
             
             // sort worklist
             qsort(mwork, wNext, sizeof(uint64_t), cmp);
-            
-//             fprintf(stderr, "< %u\n", wNext);
-//             for (int i = 0; i < wNext; ++i)
-//                 fprintf(stderr, "  %u:%u\n",
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
             
             // remove duplicates
             uint64_t last = *mwork;
@@ -494,15 +488,9 @@ void CASim::step(int n) {
                     ++q;
                 }
             }
-            
             wNext = q - mwork;
             
-//             fprintf(stderr, "< %u\n", wNext);
-//             for (int i = 0; i < wNext; ++i)
-//                 fprintf(stderr, "  %u:%u\n",
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
-            
+            // copy filtered worklist to GPU for next step
             cudaMemcpy(work0, mwork, wNext * sizeof(uint64_t), cudaMemcpyHostToDevice);
             wAmount = wNext;
         } else {
