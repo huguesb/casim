@@ -207,11 +207,11 @@ __global__ void kernelInitWorklist(uint32_t *work, size_t n) {
 template <uint16_t T>
 __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
                                        uint8_t *in, uint8_t *out, size_t pitch) {
-    __shared__ int update[9];
+    __shared__ unsigned int update[9];
     __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
     
     // derive row/col from worklist
-    unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int idx = blockIdx.x;
     
     uint32_t row = iwork[2*idx+0] + threadIdx.y;
     uint32_t col = iwork[2*idx+1] + threadIdx.x;
@@ -236,38 +236,45 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
     // determine modification
     uint32_t mod = mid ^ nval;
     
+    unsigned int tidx = threadIdx.y * blockIdx.x + threadIdx.x;
+    if (tidx < 9)
+        update[tidx] = 0;
+    
+    __syncthreads();
+    
     if (mod) {
         // only one thread will successfully write, doesn't matter which one
         update[4] = 1;
         
         if (blockIdx.x != 0 && threadIdx.x == 0 && (mod & 0xff)) {
             update[3] = 1;
+            if (blockIdx.y != 0 && threadIdx.x == 0)
+                update[0] = 1;
+            if (blockIdx.y != gridDim.y-1 && threadIdx.x == blockDim.x-1)
+                update[6] = 1;
         } else if (blockIdx.x != gridDim.x-1 && threadIdx.x == blockDim.x-1 && (mod & 0xff000000)) {
             update[5] = 1;
+            if (blockIdx.y != 0 && threadIdx.y == 0)
+                update[2] = 1;
+            if (blockIdx.y != gridDim.y-1 && threadIdx.y == blockDim.x-1)
+                update[8] = 1;
         }
         
         if (blockIdx.y != 0 && threadIdx.y == 0) {
             update[1] = 1;
-            if (threadIdx.x == 0)
-                update[0] = 1;
-            if (threadIdx.x == blockDim.x-1)
-                update[6] = 1;
         } else if (blockIdx.y != gridDim.y-1 && threadIdx.y == blockDim.y-1) {
             update[7] = 1;
-            if (threadIdx.x == 0)
-                update[2] = 1;
-            if (threadIdx.x == blockDim.x-1)
-                update[8] = 1;
         }
     }
     
-//     __syncthreads();
-//     
-//     if (threadIdx.x == 0) {
-//         int count = update[0] + update[1] + update[2] +
-//                     update[3] + update[4] + update[5] + 
-//                     update[6] + update[7] + update[8];
-//         unsigned int offset = atomicAdd(caParams.workOffset, count);
+    __syncthreads();
+    
+    if (threadIdx.x == 0) {
+        unsigned int count = update[0] + update[1] + update[2] +
+                             update[3] + update[4] + update[5] + 
+                             update[6] + update[7] + update[8];
+        
+        unsigned int offset = atomicAdd(caParams.workOffset, count);
 //         uint32_t *ow = owork + 2*offset;
 //         
 //         if (update[0]) { ow[0] = row-1; ow[1] = col-1; ow += 2; }
@@ -279,7 +286,7 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
 //         if (update[6]) { ow[0] = row+1; ow[1] = col-1; ow += 2; }
 //         if (update[7]) { ow[0] = row+1; ow[1] = col;   ow += 2; }
 //         if (update[8]) { ow[0] = row+1; ow[1] = col+1; }
-//     }
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -386,34 +393,45 @@ void CASim::step(int n) {
                 scell + pitch, dcell + pitch, pitch);
         
 #else
-        uint32_t workAmount;
-        cudaMemcpy(&workAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        // when worklist contains all the macrocells, the update phase alone
+        // is more than twice as slow as the naive approach as it needs to read
+        // from the worklist
+        // TODO: switch back and forth between naive and worklist depending on
+        // the size of the worklist?
+        uint32_t wAmount, wNext;
+        cudaMemcpy(&wAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
         cudaDeviceSynchronize();
         
-        fprintf(stderr, "updating %u macrocells\n", workAmount);
-        
-        dim3 updateBlockDim(kMacroCellWidth / 4, kMacroCellHeight, 1);
-        dim3 updateGridDim(workAmount, 1);
+        fprintf(stderr, "updating %u macrocells\n", wAmount);
         
         cudaMemset(workOffset, 0, sizeof(uint32_t));
         cudaDeviceSynchronize();
         
+        cudaMemcpy(&wNext, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "%u\n", wNext);
         
-        if (rule->type == CARule::WireWorld)
-            kernelCAUpdateWorkList<CARule::WireWorld><<<updateGridDim, updateBlockDim>>>(
-                work0, work1, scell + pitch, dcell + pitch, pitch);
-        else
-            kernelCAUpdateWorkList<CARule::LifeLike><<<updateGridDim, updateBlockDim>>>(
-                work0, work1, scell + pitch, dcell + pitch, pitch);
+        dim3 updateBlockDim(kMacroCellWidth / 4, kMacroCellHeight, 1);
         
+        int wLim = 1024;
+        
+        for (int i = 0; i < (wAmount + wLim-1)/wLim; ++i) {
+            dim3 updateGridDim(min(wLim, wAmount - i*wLim), 1);
+            if (rule->type == CARule::WireWorld)
+                kernelCAUpdateWorkList<CARule::WireWorld><<<updateGridDim, updateBlockDim>>>(
+                    work0 + i*2*wLim, work1, scell + pitch, dcell + pitch, pitch);
+            else
+                kernelCAUpdateWorkList<CARule::LifeLike><<<updateGridDim, updateBlockDim>>>(
+                    work0 + i*2*wLim, work1, scell + pitch, dcell + pitch, pitch);
+            
+        }
         cudaDeviceSynchronize();
         
-        cudaMemcpy(&workAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
-        fprintf(stderr, "%u macrocells scheduled for update\n", workAmount);
+        cudaMemcpy(&wNext, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+        fprintf(stderr, "%u macrocells scheduled for update\n", wNext);
         
         // TODO: sort work1
-        thrust::device_ptr<uint64_t> wit(reinterpret_cast<uint64_t*>(work1));
-        thrust::stable_sort(wit, wit + workAmount);
+//         thrust::device_ptr<uint64_t> wit(reinterpret_cast<uint64_t*>(work1));
+//         thrust::stable_sort(wit, wit + wAmount);
         
         // TODO: filter work0 into work1
         
