@@ -51,25 +51,72 @@ __constant__ CAParams caParams;
 ////////////////////////////////////////////////////////////////////////////////
 
 enum {
-    kMacroCellWidth = 16,
-    kMacroCellHeight = 16,
-    
+    kMacroCellWidth = 32,
+    kMacroCellHeight = 16
 };
 
-// naive, embarassingly parallel CA update
+// core CA update
+// responsible for updating 4 adjacent cells in a rows
+// * mid is the old values of the 4 cells to update (little endian)
+// * sp is the shared memory array containing the old values of all cells in the
+// macrocell being updated plus all boundary cells (Moore neighbourhood). Aligned
+// on 4-byte boundary
+// * return the new values of the cells (same encoding)
 template <uint16_t T>
-__global__ void kernelCAUpdateNaive(uint8_t *in, size_t ipitch,
-                                    uint8_t *out, size_t opitch) {
-    __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
-    
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    // cooperative load of relevant old cell values to shared memory
-    uint8_t *ip = in + row * ipitch + col * 4;
-    
-    uint8_t *sp = ocells + (threadIdx.y+1) * (kMacroCellWidth+8) + (threadIdx.x+1) * 4;
-    
+inline __device__ uint32_t CAUpdateCore(uint32_t mid, uint8_t *sp) {
+    uint32_t nval = 0;
+    if (T == CARule::WireWorld) {
+        // WireWorld
+        // TODO:
+        
+    } else {
+        // Life-like
+        const int S = caParams.S, B = caParams.B;
+        
+        const int stride = kMacroCellWidth+8;
+        // NOTE: assume GPU in little-endian mode
+        // TODO: get driver to ensure little-endian mode during setup
+        const uint32_t top = *reinterpret_cast<uint32_t*>(sp-stride);
+        const uint32_t bot = *reinterpret_cast<uint32_t*>(sp+stride);
+        
+        const int atop = (top & 0xff), btop = ((top >> 8) & 0xff), ctop = ((top >> 16) & 0xff), dtop  = ((top >> 24) & 0xff);
+        const int amid = (mid & 0xff), bmid = ((mid >> 8) & 0xff), cmid = ((mid >> 16) & 0xff), dmid  = ((mid >> 24) & 0xff);
+        const int abot = (bot & 0xff), bbot = ((bot >> 8) & 0xff), cbot = ((bot >> 16) & 0xff), dbot  = ((bot >> 24) & 0xff);
+        
+        int sum =
+            sp[-stride-1] + atop + btop +
+            sp[       -1]        + bmid +
+            sp[ stride-1] + abot + bbot;
+        
+        nval |= ((1 << sum) & (amid ? S : B)) ? 1 : 0;
+        
+        sum =
+            atop + btop + ctop +
+            amid        + cmid +
+            abot + bbot + cbot;
+        
+        nval |= ((1 << sum) & (bmid ? S : B)) ? (1 << 8) : 0;
+        
+        sum =
+            btop + ctop + dtop +
+            bmid        + dmid +
+            bbot + cbot + dbot;
+        
+        nval |= ((1 << sum) & (cmid ? S : B)) ? (1 << 16) : 0;
+        
+        sum =
+            ctop + dtop + sp[-stride+4] +
+            cmid        + sp[        4] +
+            cbot + dbot + sp[ stride+4];
+        
+        nval |= ((1 << sum) & (dmid ? S : B)) ? (1 << 24) : 0;
+    }
+    return nval;
+}
+
+//
+//
+inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip, size_t pitch) {
     uint32_t mid;
     
     // load inner cells cooperatively
@@ -87,7 +134,7 @@ __global__ void kernelCAUpdateNaive(uint8_t *in, size_t ipitch,
         // load top and bottom boundary cells
         if (threadIdx.y == 0) {
             sp -= (kMacroCellWidth+8);
-            ip -= ipitch;
+            ip -= pitch;
             *reinterpret_cast<uint32_t*>(sp) = *reinterpret_cast<uint32_t*>(ip);
             if (threadIdx.x == 0) {
                 sp[-1] = blockIdx.x == 0 ? 0 : ip[-1];
@@ -97,7 +144,7 @@ __global__ void kernelCAUpdateNaive(uint8_t *in, size_t ipitch,
             sp += (kMacroCellWidth+8);
         } else if (threadIdx.y == blockDim.y-1) {
             sp += (kMacroCellWidth+8);
-            ip += ipitch;
+            ip += pitch;
             *reinterpret_cast<uint32_t*>(sp) = *reinterpret_cast<uint32_t*>(ip);
             if (threadIdx.x == 0) {
                 sp[-1] = blockIdx.x == 0 ? 0 : ip[-1];
@@ -116,85 +163,99 @@ __global__ void kernelCAUpdateNaive(uint8_t *in, size_t ipitch,
             sp[4] = 0;
         }
     }
+    return mid;
+}
+
+// naive, embarassingly parallel CA update
+template <uint16_t T>
+__global__ void kernelCAUpdateNaive(uint8_t *in,  uint8_t *out, size_t pitch) {
+    
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    uint8_t *ip = in + row * pitch + col * 4;
+    
+    // cooperative load of relevant old cell values to shared memory
+    __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
+    uint8_t *sp = ocells + (threadIdx.y+1) * (kMacroCellWidth+8) + (threadIdx.x+1) * 4;
+    
+    uint32_t mid = loadCells(row, col, sp, ip, pitch);
+    
+    // wait for shared array to be fully initialized
+    __syncthreads();
+    
+    // only update relevant cells
+    if (row >= caParams.height || col >= caParams.width)
+        return;
+    
+    uint32_t nval = CAUpdateCore<T>(mid, sp);
+    uint8_t *op = out + row * pitch + col * 4;
+    *reinterpret_cast<uint32_t*>(op) = nval;
+}
+
+// more sophisticated worklist-based approach
+// may or may not be faster depending on the state
+template <uint16_t T>
+__global__ void kernelCAUpdateWorkList(uint32_t *iworklist, uint32_t *oworklist,
+                                       uint8_t *in, uint8_t *out, size_t pitch) {
+    // derive row/col from worklist
+    unsigned int item = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    int row = iworklist[2*item+0];
+    int col = iworklist[2*item+1];
+    
+    uint8_t *ip = in + row * pitch + col * 4;
+    
+    // cooperative load of relevant old cell values to shared memory
+    __shared__ uint8_t ocells[(kMacroCellHeight+2)*(kMacroCellWidth+8)];
+    uint8_t *sp = ocells + (threadIdx.y+1) * (kMacroCellWidth+8) + (threadIdx.x+1) * 4;
+    
+    uint32_t mid = loadCells(row, col, sp, ip, pitch);
     
     __syncthreads();
     
     if (row >= caParams.height || col >= caParams.width)
         return;
     
-    uint8_t *op = out + row * opitch + col * 4;
+    uint32_t nval = CAUpdateCore<T>(mid, sp);
+    uint8_t *op = out + row * pitch + col * 4;
+    *reinterpret_cast<uint32_t*>(op) = nval;
     
-    if (T == CARule::WireWorld) {
-        // WireWorld
-        // TODO:
+    // determine modification
+    uint32_t mod = mid ^ nval;
+    
+    __shared__ int update[9];
+    if (mod) {
+        // only one thread will successfully write, doesn't matter which one
+        update[4] = 1;
         
-    } else {
-        // Life-like
-        uint32_t nval = 0;
-        int stride = kMacroCellWidth+8;
-#if 0
-        for (int i = 0; i < 4; ++i) {
-            // compute number of live neighbours
-            int sum =
-            (sp[i-stride-1] & 1) + (sp[i-stride] & 1) + (sp[i-stride+1] & 1) +
-            (sp[i       -1] & 1)                      + (sp[i       +1] & 1) +
-            (sp[i+stride-1] & 1) + (sp[i+stride] & 1) + (sp[i+stride+1] & 1);
-            
-            int ne = ((1 << sum) & (sp[i] ? caParams.S : caParams.B)) ? 1 : 0;
-            nval |= ne << (8*i);
+        if (blockIdx.x != 0 && threadIdx.x == 0 && (mod & 0xff)) {
+            update[3] = 1;
+        } else if (blockIdx.x != gridDim.x-1 && threadIdx.x == blockDim.x-1 && (mod & 0xff000000)) {
+            update[5] = 1;
         }
-#else
-        // TODO: check that little-endian is certain on all GPUs
-        uint32_t top = *reinterpret_cast<uint32_t*>(sp-stride);
-        //uint32_t mid = *reinterpret_cast<uint32_t*>(sp);
-        uint32_t bot = *reinterpret_cast<uint32_t*>(sp+stride);
         
-        int atop = (top & 0xff), btop = ((top >> 8) & 0xff), ctop = ((top >> 16) & 0xff), dtop  = ((top >> 24) & 0xff);
-        int amid = (mid & 0xff), bmid = ((mid >> 8) & 0xff), cmid = ((mid >> 16) & 0xff), dmid  = ((mid >> 24) & 0xff);
-        int abot = (bot & 0xff), bbot = ((bot >> 8) & 0xff), cbot = ((bot >> 16) & 0xff), dbot  = ((bot >> 24) & 0xff);
-        
-        int sum =
-            sp[-stride-1] + atop + btop +
-            sp[       -1]        + bmid +
-            sp[ stride-1] + abot + bbot;
-        
-        //int na = ((1 << sum) & (amid ? caParams.S : caParams.B)) ? 1 : 0;
-        nval |= ((1 << sum) & (amid ? caParams.S : caParams.B)) ? 1 : 0;
-        
-        sum =
-            atop + btop + ctop +
-            amid        + cmid +
-            abot + bbot + cbot;
-        
-//         int nb = ((1 << sum) & (bmid ? caParams.S : caParams.B)) ? 1 : 0;
-        nval |= ((1 << sum) & (bmid ? caParams.S : caParams.B)) ? (1 << 8) : 0;
-        
-        sum =
-            btop + ctop + dtop +
-            bmid        + dmid +
-            bbot + cbot + dbot;
-        
-//         int nc = ((1 << sum) & (cmid ? caParams.S : caParams.B)) ? 1 : 0;
-        nval |= ((1 << sum) & (cmid ? caParams.S : caParams.B)) ? (1 << 16) : 0;
-        
-        sum =
-            ctop + dtop + sp[-stride+4] +
-            cmid        + sp[        4] +
-            cbot + dbot + sp[ stride+4];
-        
-//         int nd = ((1 << sum) & (dmid ? caParams.S : caParams.B)) ? 1 : 0;
-        nval |= ((1 << sum) & (dmid ? caParams.S : caParams.B)) ? (1 << 24) : 0;
-        
-//         nval = (nd << 24) | (nc << 16) | (nb << 8) | na;
-#endif
-        *reinterpret_cast<uint32_t*>(op) = nval;
+        if (blockIdx.y != 0 && threadIdx.y == 0) {
+            update[1] = 1;
+            if (threadIdx.x == 0)
+                update[0] = 1;
+            if (threadIdx.x == blockDim.x-1)
+                update[6] = 1;
+        } else if (blockIdx.y != gridDim.y-1 && threadIdx.y == blockDim.y-1) {
+            update[7] = 1;
+            if (threadIdx.x == 0)
+                update[2] = 1;
+            if (threadIdx.x == blockDim.x-1)
+                update[8] = 1;
+        }
     }
-}
-
-// more sophisticated worklist-based approach
-// may or may not be faster depending on the state
-__global__ void kernelCAUpdateWorkList() {
-
+    
+    __syncthreads();
+    
+    // cooperatively update worklist
+    if (threadIdx.y * blockDim.x + threadIdx.x < 9) {
+        // TODO:
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -286,15 +347,13 @@ void CASim::step(int n) {
         
         uint8_t *src = (generation & 1) ? cell1 : cell0;
         uint8_t *dst = (generation & 1) ? cell0 : cell1;
-        size_t spitch = (generation & 1) ? pitch1 : pitch0;
-        size_t dpitch = (generation & 1) ? pitch0 : pitch1;
         
         if (rule->type == CARule::WireWorld)
             kernelCAUpdateNaive<CARule::WireWorld><<<updateGridDim, updateBlockDim>>>(
-                src + spitch, spitch, dst + dpitch, dpitch);
+                src + pitch, dst + pitch, pitch);
         else
             kernelCAUpdateNaive<CARule::LifeLike><<<updateGridDim, updateBlockDim>>>(
-                src + spitch, spitch, dst + dpitch, dpitch);
+                src + pitch, dst + pitch, pitch);
         
         cudaDeviceSynchronize();
         ++generation;
@@ -331,8 +390,15 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     int wpad = (width & 15);
     if (wpad)
         wpad = 16 - wpad;
+    size_t pitch0, pitch1;
     cudaMallocPitch(&cell0, &pitch0, width + wpad, height+2);
     cudaMallocPitch(&cell1, &pitch1, width + wpad, height+2);
+    
+    if (pitch0 != pitch1) {
+        fprintf(stderr, "Pitch mismatch\n");
+        return false;
+    }
+    pitch = pitch0;
     
     // set global CA params
     CAParams params;
@@ -348,21 +414,21 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     // copy initial state to first buffer
     // for now simple 1:1 mapping, each byte being one cell but may change in
     // the future to allow further optimization
-    cudaMemcpy2D(cell0+pitch0, pitch0, cells, width, width, height, cudaMemcpyHostToDevice);
+    cudaMemcpy2D(cell0+pitch, pitch, cells, width, width, height, cudaMemcpyHostToDevice);
     
     // reset padding rows
     cudaMemset(cell0, 0, width);
-    cudaMemset(cell0+(height+1)*pitch0, 0, width);
+    cudaMemset(cell0+(height+1)*pitch, 0, width);
     cudaMemset(cell1, 0, width);
-    cudaMemset(cell1+(height+1)*pitch1, 0, width);
+    cudaMemset(cell1+(height+1)*pitch, 0, width);
     
     // reset padding columns
     if (wpad) {
 //         for (int i = 0; i < height+2; ++i) {
-//             cudaMemset(cell0+i*pitch0+width, 0, wpad);
-//             cudaMemset(cell1+i*pitch1+width, 0, wpad);
+//             cudaMemset(cell0+i*pitch+width, 0, wpad);
+//             cudaMemset(cell1+i*pitch+width, 0, wpad);
 //         }
-        cudaMemset2D(cell0+width, pitch0, 0, wpad, height+2);
+        cudaMemset2D(cell0+width, pitch, 0, wpad, height+2);
     }
     
     return true;
@@ -373,8 +439,7 @@ void CASim::getCells(uint8_t *cells) {
     // for now simple 1:1 mapping, each byte being one cell but may change in
     // the future to allow further optimization
     uint8_t *src = (generation & 1) ? cell1 : cell0;
-    size_t spitch = (generation & 1) ? pitch1 : pitch0;
     
-    cudaMemcpy2D(cells, width, src+spitch, spitch,
+    cudaMemcpy2D(cells, width, src+pitch, pitch,
                  width, height, cudaMemcpyDeviceToHost);
 }

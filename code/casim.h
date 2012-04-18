@@ -33,10 +33,11 @@ private:
     unsigned int generation;
     unsigned int width;
     unsigned int height;
-    size_t pitch0;
-    size_t pitch1;
+    size_t pitch;
     uint8_t *cell0;
     uint8_t *cell1;
+    uint32_t *worklist0;
+    uint32_t *worklist1;
 };
 
 #endif  // CA_SIM_H
