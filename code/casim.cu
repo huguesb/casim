@@ -308,6 +308,86 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
     }
 }
 
+enum {
+    kFilterCacheSize = 256
+};
+
+// NOTE: small worklist version : REQUIRES sz < kFilterCacheSize
+__global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int sz) {
+    __shared__ int filter[kFilterCacheSize];
+    __shared__ uint64_t values[kFilterCacheSize];
+    
+    uint64_t val;
+    
+    if (threadIdx.x >= sz)
+        return;
+    
+    // cooperative load
+    val = reinterpret_cast<uint64_t*>(iwork)[threadIdx.x];
+    val = (val << 32) | (val >> 32);
+    values[threadIdx.x] = val;
+    filter[threadIdx.x] = -1;
+    
+    __syncthreads();
+    
+    // lockstep position determination
+    int position = 0;
+    for (int i = 0; i < sz; ++i) {
+        if (val > values[i])
+            ++position;
+    }
+    
+    // there may be duplicates in the input array so the positions will be off
+    // run a prefix sum on the filter array to get the number of gaps before a
+    // given position
+    filter[position] = 0;
+    __syncthreads();
+    
+    int offset = filter[threadIdx.x];
+    
+    // simple block-wide inclusive prefix sum
+    // TODO: use more efficient impl (warp-wide lockstep and sum propagation)
+    #define PREFIX_SUM_B(N, V, A, S) \
+    if (S > N) { if (threadIdx.x >= N) { V += A[threadIdx.x - N]; } __syncthreads(); A[threadIdx.x] = V; __syncthreads(); }
+    
+    // enforce lockstep between warps
+    PREFIX_SUM_B(1, offset, filter, sz)
+    PREFIX_SUM_B(2, offset, filter, sz)
+    PREFIX_SUM_B(4, offset, filter, sz)
+    PREFIX_SUM_B(8, offset, filter, sz)
+    PREFIX_SUM_B(16, offset, filter, sz)
+    PREFIX_SUM_B(32, offset, filter, sz)
+    PREFIX_SUM_B(64, offset, filter, sz)
+    PREFIX_SUM_B(128, offset, filter, sz)
+    PREFIX_SUM_B(256, offset, filter, sz)
+    
+    #undef PREFIX_SUM_B
+    
+    __syncthreads();
+    
+    // fix position to account for duplicate removal (offset is negative)
+    position += filter[position];
+    
+    // cooperative store (w/ duplicate removal by design)
+    // relies on he spec re concurrent shared mem write : all writes to a given
+    // position have the same value so which succeeds doesn't affect correctness
+    values[position] = val;
+    
+    // fix size to account for duplicate removal
+    sz += filter[sz-1];
+    
+    // store filtered values to output array
+    if (threadIdx.x < sz) {
+        val = values[threadIdx.x];
+        val = (val << 32) | (val >> 32);
+        reinterpret_cast<uint64_t*>(owork)[threadIdx.x] = val;
+    }
+    
+    // CPU need to know the size of the filtered array
+    if (threadIdx.x == 0)
+        *caParams.workOffset = sz;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 CARule::CARule(const char *s) {
@@ -436,7 +516,7 @@ void CASim::step(int n) {
         cudaMemset(workOffset, 0, sizeof(uint32_t));
         cudaDeviceSynchronize();
         
-        int wLim = 1024;
+        int wLim = 65536;
         
         for (int i = 0; i < (wAmount + wLim-1)/wLim; ++i) {
             dim3 updateGridDim(min(wLim, wAmount - i*wLim), 1);
@@ -460,9 +540,34 @@ void CASim::step(int n) {
         
         // TODO: find best empirical threshold
         const uint32_t threshold = 1024;
-        
-        if (wNext < threshold) {
-            // too small : no point doing the sort and duplicate removal on GPU
+        if (wNext < kFilterCacheSize) {
+            // fits in shared memory : super-fast fused sort/filter
+            
+//             if (wNext > wAlloc) {
+//                 wAlloc = wNext;
+//                 mwork = (uint64_t*)realloc(mwork, wAlloc * sizeof(uint64_t));
+//             }
+//             fprintf(stderr, "> %u\n", wNext);
+//             cudaMemcpy(mwork, work1, wNext * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+//             for (int i = 0; i < wNext; ++i)
+//                 fprintf(stderr, "  %u:%u\n",
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+            
+            kernelSortFilterWorkList<<<1, wNext>>>(work1, work0, wNext);
+            
+            cudaDeviceSynchronize();
+            cudaMemcpy(&wAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+            
+//             fprintf(stderr, "< %u\n", wAmount);
+//             cudaMemcpy(mwork, work0, wAmount * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+//             for (int i = 0; i < wAmount; ++i)
+//                 fprintf(stderr, "  %u:%u\n",
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+        } else if (wNext < threshold) {
+            // TODO: implement global-mem version of shared-mem fused sort/filter
+            // too small : on-CPU sort/filter is faster than thrust...
             
             // make sure the CPU-side worklist buffer is large enough
             if (wNext > wAlloc) {
@@ -492,6 +597,7 @@ void CASim::step(int n) {
             
             // copy filtered worklist to GPU for next step
             cudaMemcpy(work0, mwork, wNext * sizeof(uint64_t), cudaMemcpyHostToDevice);
+            cudaDeviceSynchronize();
             wAmount = wNext;
         } else {
             // sort worklist
@@ -501,7 +607,6 @@ void CASim::step(int n) {
         }
 #endif
         ++generation;
-        cudaDeviceSynchronize();
     }
     
     free(mwork);
