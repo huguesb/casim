@@ -346,8 +346,7 @@ __global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int s
     int offset = filter[threadIdx.x];
     
     // simple block-wide inclusive prefix sum
-    #if 1
-    // TODO: use more efficient impl (warp-wide lockstep and sum propagation)
+    // TODO: use more efficient impl?
     #define PREFIX_SUM_B(N, V, A, S) \
     if (S > N) { if (threadIdx.x >= N) { V += A[threadIdx.x - N]; } __syncthreads(); A[threadIdx.x] = V; __syncthreads(); }
     
@@ -360,50 +359,8 @@ __global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int s
     PREFIX_SUM_B(32, offset, filter, sz)
     PREFIX_SUM_B(64, offset, filter, sz)
     PREFIX_SUM_B(128, offset, filter, sz)
-    PREFIX_SUM_B(256, offset, filter, sz)
     
     #undef PREFIX_SUM_B
-    
-    #else
-    
-    int lane = threadIdx.x & (kWarpSize-1);
-    int warp = threadIdx.x / kWarpSize;
-    int warpCount = (sz + kWarpSize - 1) / kWarpSize;
-    
-    #define PREFIX_SUM_W(N, V, A) \
-    if (lane >= N) { A[threadIdx.x] = (V += A[threadIdx.x - N]); }
-    
-    PREFIX_SUM_W(1, offset, filter)
-    PREFIX_SUM_W(2, offset, filter)
-    PREFIX_SUM_W(4, offset, filter)
-    PREFIX_SUM_W(8, offset, filter)
-    PREFIX_SUM_W(16, offset, filter)
-    
-    __shared__ int totals[(kFilterCacheSize + kWarpSize - 1) / kWarpSize];
-    
-    if (lane == (kWarpSize-1))
-        totals[warp] = offset;
-    
-    __syncthreads();
-    
-    if (threadIdx.x < warpCount) {
-        int total = totals[threadIdx.x];
-        PREFIX_SUM_W(1, total, totals)
-        PREFIX_SUM_W(2, total, totals)
-        PREFIX_SUM_W(4, total, totals)
-        PREFIX_SUM_W(8, total, totals)
-    }
-    
-    __syncthreads();
-    
-    if (warp)
-        filter[threadIdx.x] += totals[warp-1];
-    
-    __syncthreads();
-    
-    #undef PREFIX_SUM_W
-    
-    #endif
     
     // fix position to account for duplicate removal (offset is negative)
     position += filter[position];
@@ -427,19 +384,6 @@ __global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int s
     // CPU need to know the size of the filtered array
     if (threadIdx.x == 0)
         *caParams.workOffset = sz;
-}
-
-__global__ void kernelCompare(uint8_t *in, uint8_t *inout, size_t pitch) {
-    unsigned int row = blockIdx.y * blockDim.y + threadIdx.y;
-    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (row >= caParams.height || col*4 >= caParams.width)
-        return;
-    
-    uint32_t *ip = reinterpret_cast<uint32_t*>(in + row * pitch + col * 4);
-    uint32_t *op = reinterpret_cast<uint32_t*>(inout + row * pitch + col * 4);
-    
-    *op = *ip ^ *op;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -530,13 +474,10 @@ static int cmp(const void *a, const void *b) {
     return diff ? diff : ((const int*)a)[0] - ((const int*)b)[0];
 }
 
-//#define DBG
-
 void CASim::step(int n) {
     fprintf(stderr, "Running %i steps of %s\n", n, rule->toString());
     double ref = CycleTimer::currentSeconds();
     
-    uint8_t *diffs = new uint8_t[width*height];
     uint64_t *mwork = 0;
     uint32_t wAmount, wAlloc = 0;
     cudaMemcpy(&wAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
@@ -585,20 +526,6 @@ void CASim::step(int n) {
             
         }
         
-        #ifdef DBG
-        {
-            dim3 updateGridDim((width / 4 + updateBlockDim.x - 1) / updateBlockDim.x,
-                            (height + updateBlockDim.y - 1) / updateBlockDim.y);
-            
-            if (rule->type == CARule::WireWorld)
-                kernelCAUpdateNaive<CARule::WireWorld><<<updateGridDim, updateBlockDim>>>(
-                    scell + pitch, cell2 + pitch, pitch);
-            else
-                kernelCAUpdateNaive<CARule::LifeLike><<<updateGridDim, updateBlockDim>>>(
-                    scell + pitch, cell2 + pitch, pitch);
-        }
-        #endif
-        
         cudaDeviceSynchronize();
         
         uint32_t wNext;
@@ -609,83 +536,20 @@ void CASim::step(int n) {
             break;
         }
         
-        #ifdef DBG
-        if (wNext > wAlloc) {
-            wAlloc = wNext;
-            mwork = (uint64_t*)realloc(mwork, wAlloc * sizeof(uint64_t));
-        }
-        
-        //fprintf(stderr, "> %u\n", wNext);
-        cudaMemcpy(mwork, work1, wNext * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-        for (int j = 0; j < wNext; ++j) {
-            uint32_t col = reinterpret_cast<uint32_t*>(mwork)[2*j+0];
-            uint32_t row = reinterpret_cast<uint32_t*>(mwork)[2*j+1];
-            //fprintf(stderr, "  %u:%u\n", row, col);
-            if ((col % (kMacroCellWidth / 4)) || (row % kMacroCellHeight) ||
-                (col > ((width-kMacroCellWidth) / 4)) || (row > height-kMacroCellHeight)) {
-                fprintf(stderr, "Invalid worklist item at step %i : %u:%u\n", j, row, col);
-                return;
-            }
-        }
-        
-        {
-            dim3 updateGridDim((width / 4 + updateBlockDim.x - 1) / updateBlockDim.x,
-                            (height + updateBlockDim.y - 1) / updateBlockDim.y);
-            
-            kernelCompare<<<updateGridDim, updateBlockDim>>>(dcell + pitch,
-                                                             cell2 + pitch, pitch);
-            
-            cudaDeviceSynchronize();
-            cudaMemcpy2D(diffs, width, cell2+pitch, pitch,
-                         width, height, cudaMemcpyDeviceToHost);
-            
-            int n = 0;
-            for (uint32_t j = 0; j < width*height; ++j) {
-                if (diffs[j]) {
-                    uint32_t row = j / width;
-                    uint32_t col = j % width;
-                    fprintf(stderr, "Diff (%u:%u) : %02x [step: %u]\n",
-                            row, col, (uint32_t)diffs[j], i);
-                    ++n;
-                }
-            }
-            if (n) {
-                cudaMemcpy(mwork, work0, wAmount * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-                for (int j = 0; j < wAmount; ++j)
-                    fprintf(stderr, "  %u:%u\n",
-                            reinterpret_cast<uint32_t*>(mwork)[2*j+1],
-                            reinterpret_cast<uint32_t*>(mwork)[2*j+0]);
-                return;
-            }
-        }
-        #endif
-        
         // TODO: find best empirical threshold
         const uint32_t threshold = 1024;
         if (wNext < kFilterCacheSize) {
             // fits in shared memory : super-fast fused sort/filter
-            
-//             fprintf(stderr, "> %u\n", wNext);
-//             cudaMemcpy(mwork, work1, wNext * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-//             for (int j = 0; j < wNext; ++j)
-//                 fprintf(stderr, "  %u:%u\n",
-//                         reinterpret_cast<uint32_t*>(mwork)[2*j+1],
-//                         reinterpret_cast<uint32_t*>(mwork)[2*j+0]);
             
             kernelSortFilterWorkList<<<1, wNext>>>(work1, work0, wNext);
             
             cudaDeviceSynchronize();
             cudaMemcpy(&wAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
             
-//             fprintf(stderr, "< %u\n", wAmount);
-//             cudaMemcpy(mwork, work0, wAmount * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-//             for (int i = 0; i < wAmount; ++i)
-//                 fprintf(stderr, "  %u:%u\n",
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1],
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0]);
-        } /* else if (wNext < threshold) {
+        } else if (wNext < threshold) {
             // TODO: implement global-mem version of shared-mem fused sort/filter
-            // too small : on-CPU sort/filter is faster than thrust...
+            // too small : on-CPU sort/filter is faster than thrust despite
+            // communication overhead...
             
             // make sure the CPU-side worklist buffer is large enough
             if (wNext > wAlloc) {
@@ -717,8 +581,7 @@ void CASim::step(int n) {
             cudaMemcpy(work0, mwork, wNext * sizeof(uint64_t), cudaMemcpyHostToDevice);
             cudaDeviceSynchronize();
             wAmount = wNext;
-        }*/ else {
-            //fprintf(stderr, "< %u\n", wNext);
+        } else {
             // sort worklist
             thrust::sort(wit1, wit1 + wNext);
             // remove duplicates
@@ -727,7 +590,6 @@ void CASim::step(int n) {
 #endif
     }
     
-    delete[] diffs;
     free(mwork);
     
     double end = CycleTimer::currentSeconds();
@@ -747,7 +609,6 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     
     if (cell0) cudaFree(cell0);
     if (cell1) cudaFree(cell1);
-    if (cell2) cudaFree(cell2);
     if (work0) cudaFree(work0);
     if (work1) cudaFree(work1);
     
@@ -768,12 +629,10 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     int wpad = (width & (kMacroCellWidth - 1));
     if (wpad)
         wpad = kMacroCellWidth - wpad;
-    size_t pitch0, pitch1, pitch2;
+    size_t pitch0, pitch1;
     err = cudaMallocPitch(&cell0, &pitch0, width + wpad, height+2);
     if (err) { fprintf(stderr, "Unable to allocate buffer\n"); return false; }
     err = cudaMallocPitch(&cell1, &pitch1, width + wpad, height+2);
-    if (err) { fprintf(stderr, "Unable to allocate buffer\n"); return false; }
-    err = cudaMallocPitch(&cell2, &pitch2, width + wpad, height+2);
     if (err) { fprintf(stderr, "Unable to allocate buffer\n"); return false; }
     
     // alloc worklists (macrocell granularity)
