@@ -12,6 +12,9 @@
 #include "casim.h"
 #include "cycleTimer.h"
 
+#undef _GLIBCXX_ATOMIC_BUILTINS
+#undef _GLIBCXX_USE_INT128
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -198,8 +201,8 @@ __global__ void kernelInitWorklist(uint32_t *work, uint32_t nCellX, uint32_t nCe
     uint32_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= nCellX*nCellY)
         return;
-    work[2*idx+0] = (idx / nCellX) * kMacroCellHeight;
-    work[2*idx+1] = (idx % nCellX) * (kMacroCellWidth / 4);
+    work[2*idx+0] = (idx % nCellX) * (kMacroCellWidth / 4);
+    work[2*idx+1] = (idx / nCellX) * kMacroCellHeight;
 }
 
 // more sophisticated worklist-based approach
@@ -220,8 +223,8 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
     __syncthreads();
     
     // derive row/col from macrocell position
-    unsigned int row = base[0] + threadIdx.y;
-    unsigned int col = base[1] + threadIdx.x;
+    unsigned int col = base[0] + threadIdx.x;
+    unsigned int row = base[1] + threadIdx.y;
     
     uint8_t *ip = in + row * pitch + col * 4;
     
@@ -293,23 +296,24 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
         bool lastRow = row == (caParams.height-kMacroCellHeight);
         bool lastCol = col == (caParams.width-kMacroCellWidth/4);
         if (row) {
-            if (update[0] && col)       { ow[0] = row-kMacroCellHeight; ow[1] = col-kMacroCellWidth/4; ow += 2; }
-            if (update[1])              { ow[0] = row-kMacroCellHeight; ow[1] = col;                   ow += 2; }
-            if (update[2] && !lastCol)  { ow[0] = row-kMacroCellHeight; ow[1] = col+kMacroCellWidth/4; ow += 2; }
+            if (update[0] && col)       { ow[0] = col-kMacroCellWidth/4; ow[1] = row-kMacroCellHeight; ow += 2; }
+            if (update[1])              { ow[0] = col;                   ow[1] = row-kMacroCellHeight; ow += 2; }
+            if (update[2] && !lastCol)  { ow[0] = col+kMacroCellWidth/4; ow[1] = row-kMacroCellHeight; ow += 2; }
         }
-        if (update[3] && col)           { ow[0] = row;                  ow[1] = col-kMacroCellWidth/4; ow += 2; }
-        if (cmod)                       { ow[0] = row;                  ow[1] = col;                   ow += 2; }
-        if (update[5] && !lastCol)      { ow[0] = row;                  ow[1] = col+kMacroCellWidth/4; ow += 2; }
+        if (update[3] && col)           { ow[0] = col-kMacroCellWidth/4; ow[1] = row;                  ow += 2; }
+        if (cmod)                       { ow[0] = col;                   ow[1] = row;                  ow += 2; }
+        if (update[5] && !lastCol)      { ow[0] = col+kMacroCellWidth/4; ow[1] = row;                  ow += 2; }
         if (!lastRow) {
-            if (update[6] && col)       { ow[0] = row+kMacroCellHeight; ow[1] = col-kMacroCellWidth/4; ow += 2; }
-            if (update[7])              { ow[0] = row+kMacroCellHeight; ow[1] = col;                   ow += 2; }
-            if (update[8] && !lastCol)  { ow[0] = row+kMacroCellHeight; ow[1] = col+kMacroCellWidth/4; }
+            if (update[6] && col)       { ow[0] = col-kMacroCellWidth/4; ow[1] = row+kMacroCellHeight; ow += 2; }
+            if (update[7])              { ow[0] = col;                   ow[1] = row+kMacroCellHeight; ow += 2; }
+            if (update[8] && !lastCol)  { ow[0] = col+kMacroCellWidth/4; ow[1] = row+kMacroCellHeight; }
         }
     }
 }
 
 enum {
-    kFilterCacheSize = 256
+    kFilterCacheSize = 256,
+    kWarpSize = 32
 };
 
 // NOTE: small worklist version : REQUIRES sz < kFilterCacheSize
@@ -324,7 +328,6 @@ __global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int s
     
     // cooperative load
     val = reinterpret_cast<uint64_t*>(iwork)[threadIdx.x];
-    val = (val << 32) | (val >> 32);
     values[threadIdx.x] = val;
     filter[threadIdx.x] = -1;
     
@@ -346,6 +349,7 @@ __global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int s
     int offset = filter[threadIdx.x];
     
     // simple block-wide inclusive prefix sum
+    #if 0
     // TODO: use more efficient impl (warp-wide lockstep and sum propagation)
     #define PREFIX_SUM_B(N, V, A, S) \
     if (S > N) { if (threadIdx.x >= N) { V += A[threadIdx.x - N]; } __syncthreads(); A[threadIdx.x] = V; __syncthreads(); }
@@ -363,7 +367,48 @@ __global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int s
     
     #undef PREFIX_SUM_B
     
+    #else
+    
+    int lane = threadIdx.x & (kWarpSize-1);
+    int warp = threadIdx.x / kWarpSize;
+    int warpCount = (sz + kWarpSize - 1) / kWarpSize;
+    
+    #define PREFIX_SUM_W(N, V, A) \
+    if (lane >= N) { A[threadIdx.x] = (V += A[threadIdx.x - N]); }
+    
+    PREFIX_SUM_W(1, offset, filter)
+    PREFIX_SUM_W(2, offset, filter)
+    PREFIX_SUM_W(4, offset, filter)
+    PREFIX_SUM_W(8, offset, filter)
+    PREFIX_SUM_W(16, offset, filter)
+    
+    __shared__ int totals[(kFilterCacheSize + kWarpSize - 1) / kWarpSize];
+    
+    if (lane == (kWarpSize-1))
+        totals[warp] = offset;
+    
     __syncthreads();
+    
+    if (threadIdx.x < warpCount) {
+        int total = totals[threadIdx.x];
+        int totalSum = total;
+        
+        PREFIX_SUM_W(1, totalSum, totals)
+        PREFIX_SUM_W(2, totalSum, totals)
+        PREFIX_SUM_W(4, totalSum, totals)
+        PREFIX_SUM_W(8, totalSum, totals)
+        PREFIX_SUM_W(16, totalSum, totals)
+        
+        totals[threadIdx.x] = totalSum - total;
+    }
+    
+    __syncthreads();
+    
+    filter[threadIdx.x] += totals[warp];
+    
+    __syncthreads();
+    
+    #endif
     
     // fix position to account for duplicate removal (offset is negative)
     position += filter[position];
@@ -379,7 +424,6 @@ __global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int s
     // store filtered values to output array
     if (threadIdx.x < sz) {
         val = values[threadIdx.x];
-        val = (val << 32) | (val >> 32);
         reinterpret_cast<uint64_t*>(owork)[threadIdx.x] = val;
     }
     
@@ -472,8 +516,8 @@ CASim::~CASim() {
 }
 
 static int cmp(const void *a, const void *b) {
-    int diff = *((const int*)a) - *((const int*)b);
-    return diff ? diff : ((const int*)a)[1] - ((const int*)b)[1];
+    int diff = ((const int*)a)[1] - ((const int*)b)[1];
+    return diff ? diff : ((const int*)a)[0] - ((const int*)b)[0];
 }
 
 void CASim::step(int n) {
@@ -551,8 +595,8 @@ void CASim::step(int n) {
 //             cudaMemcpy(mwork, work1, wNext * sizeof(uint64_t), cudaMemcpyDeviceToHost);
 //             for (int i = 0; i < wNext; ++i)
 //                 fprintf(stderr, "  %u:%u\n",
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1],
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0]);
             
             kernelSortFilterWorkList<<<1, wNext>>>(work1, work0, wNext);
             
@@ -563,8 +607,8 @@ void CASim::step(int n) {
 //             cudaMemcpy(mwork, work0, wAmount * sizeof(uint64_t), cudaMemcpyDeviceToHost);
 //             for (int i = 0; i < wAmount; ++i)
 //                 fprintf(stderr, "  %u:%u\n",
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0],
-//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1]);
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+1],
+//                         reinterpret_cast<uint32_t*>(mwork)[2*i+0]);
         } else if (wNext < threshold) {
             // TODO: implement global-mem version of shared-mem fused sort/filter
             // too small : on-CPU sort/filter is faster than thrust...
