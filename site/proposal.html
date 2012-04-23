@@ -49,11 +49,6 @@ each cell has five scalar values and evolution follows complex numerical equatio
 While it would be impossible to support all cases efficiently, the implementation
 should strive to accommodate a large variety of CA and simulate each of them as
 efficiently as possible.</p>
-<p>Recent GPU have large amounts of memory but there is only so much room
-in a single chip. While cellular-automata models probably don't come close to
-the terabytes of data produced by the LHC, many scientific simulations are bound
-to need more than a mere 1Gb of RAM. A challenging strech goal would be to
-distribute the work accross multiple GPU-equiped workstations through MPI.</p>
 
 <div class="section">Resources</div>
 <p>All the work will be done from scratch.</p>
@@ -65,8 +60,6 @@ distribute the work accross multiple GPU-equiped workstations through MPI.</p>
     <li>Implement one or more CA simulation algorithms using CUDA
     <li>Create some benchmarks that show the strength and weakness of this (these)
     algorithm(s)
-    <li><b>[stretch]</b>Implement a multi-GPU variant of these algorithms, using
-    MPI to distribute the work accross multiple machines.
     <li><b>[stretch]</b>Implement an FPGA-based variant of these algorithms
     <li><b>[stretch]</b>Come up with a cool (visual) demo
 </ul>

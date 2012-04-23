@@ -23,6 +23,55 @@
 
 <div style="padding-top: 1em;"><a href="index.html">Main Project Page</a></div>
 
+<p>The project is coming along nicely, with the GPU version being almost done
+at this point. The next step is to implement an FPGA version. As expected, the
+biggest obstacle is lack of time, not so much in the absolute sense, as demonstrated
+by the small time it took to implement the GPU version, but rather due to multiple
+projects (and other distractions, such as Carnival) competing for my attention.</p>
+
+<p>The "basic" deliverables still need some polish but are pretty much
+<a href="checkpoint.tar.gz">ready</a>. In the current state, the naive algorithm
+takes ~3ms to update a 1024x1024 grid of cells in the Life-like case on a GeForce
+9500M GS and about .07 ms on a GTX 480. For sparse patterns of that size, the 
+worklist-based version achieves ~10x speedup on the GeForce 9500M GS but makes
+almost no difference on the GTX 480 as this size is not large enough to significantly
+stress the much larger number of CUDA cores. The good news however is that the
+overhead of using a worklist does not appear to be an issue in the test cases so
+far.</p>
+
+<p>The "stretch" goals should be achievable in the remaining timeframe but with
+many projects fighting for my time, I may have to scale them down a little to meet
+the deadline.</p>
+
+<p>Ideally, the demo at the parallelism competion would be a real-time graphical
+display (either slowed down or only sampled periodically as the updates are much
+faster than what a typical display and the human eye can cope with) of both
+CA implementation running the
+<a href="http://www.quinapalus.com/wi-index.html">WireWorld computer</a>.
+As such a slowed-down display would not easily capture the strength and weaknesses
+of each implementation, it would obviously be accompanied by a couple of graphs.</p>
+
+<p>Besides the lack of time, the biggest issue in the coming weeks will probably
+be the design of the interconnect for the FPGA implementation. This is not an area
+I am familiar with and I have yet to find good resources on the topic.</p>
+
+<p>
+With two project deadlines coming up on 5/2, I will probably have very little time
+to work on the FPGA implementation before 5/3. With that in mind the tentative
+schedule for the coming weeks is as follows :
+<table class="projectSchedule">
+<tr>
+  <td width="110"><span style="font-weight: bold;">Week</span></td>
+  <td width="380"><span style="font-weight: bold;">What I Plan To Do</span></td>
+  <td><span style="font-weight: bold;">What I Actually Did</span></td>
+</tr>
+<tr><td>Mon 4/23-Thu 4/26</td><td>Think/scribble re FPGA version</td><td>&nbsp;</td></tr>
+<tr><td>Fri 4/27-Sun 4/29</td><td>Implement FPGA version</td><td>&nbsp;</td></tr>
+<tr><td>Mon 4/30-Thu 5/3</td><td>Implement FPGA version</td><td>&nbsp;</td></tr>
+<tr><td>Fri 5/4-Sun 5/6</td><td>Test and optimize FPGA version</td><td>&nbsp;</td></tr>
+<tr><td>Mon 5/7-Thu 5/10</td><td>Polish and writeup</td><td>&nbsp;</td></tr>
+</table>
+</p>
 
 </div>
 
