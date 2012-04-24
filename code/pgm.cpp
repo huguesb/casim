@@ -13,6 +13,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 PGM::PGM()
     : m_owner(true), m_width(0), m_height(0), m_white(0), m_data(0) {
@@ -30,6 +31,16 @@ PGM::PGM(unsigned int width, unsigned int height, uint8_t white, uint8_t *data)
 
 PGM::~PGM() {
     if (m_owner) free(m_data);
+}
+
+bool PGM::loadPattern(const char *file) {
+    size_t n = strlen(file);
+    if (!strcmp(file + n - 3, ".wi"))
+        return loadWirePattern(file);
+    if (!strcmp(file + n - 4, ".rle"))
+        return loadRLEPattern(file);
+    
+    return load(file);
 }
 
 bool PGM::load(const char *file) {
@@ -86,6 +97,91 @@ bool PGM::load(const char *file) {
     }
     
     return true;
+}
+
+// Wire pattern format (from http://www.quinapalus.com/wi-index.html)
+// * first line : <width> <height> (base 10 ascii encoding)
+// * height lines of width ASCII characters
+//    space : empty cell    (state 0 in PGM encoding)
+//    @     : electron head (state 1 in PGM encoding)
+//    ~     : electron tail (state 2 in PGM encoding)
+//    #     : conductor     (state 4 in PGM encoding)
+bool PGM::loadWirePattern(const char *file) {
+    if (!m_owner) {
+        m_owner = true;
+        m_data = 0;
+    }
+    m_width = 0;
+    m_height = 0;
+    
+    FILE *f = fopen(file, "rt");
+    if (!f) {
+        fprintf(stderr, "Unable to open %s for reading.\n", file);
+        return false;
+    }
+    
+    fscanf(f, "%u", &m_width);
+    fscanf(f, "%u", &m_height);
+    
+    m_white = 4;
+    
+    int c = fgetc(f);
+    if (c != '\n') {
+        fprintf(stderr, "Invalid Wire pattern: %s\n", file);
+        m_width = 0;
+        m_height = 0;
+        return false;
+    }
+    
+    m_data = (uint8_t*)realloc(m_data, m_width * m_height);
+    
+    for (unsigned int i = 0; i < m_height; ++i) {
+        uint8_t *row = m_data + m_width * i;
+        size_t n = fread(row, sizeof(uint8_t), m_width, f);
+        int c = fgetc(f);
+        if (n != m_width || c != '\n') {
+            fprintf(stderr, "Invalid Wire pattern (malformed line %u) : %s\n", i, file);
+            m_width = 0;
+            m_height = 0;
+            return false;
+        }
+        for (unsigned int j = 0; j < m_width; ++j) {
+            uint8_t c = row[j];
+            if (c == ' ') c = 0;
+            else if (c == '@') c = 1;
+            else if (c == '~') c = 2;
+            else if (c == '#') c = 4;
+            else {
+                fprintf(stderr, "Invalid Wire pattern: %s(%u,%u) = %x\n",
+                        file, i, j, c);
+                m_width = 0;
+                m_height = 0;
+                return false;
+            }
+            row[j] = c;
+        }
+    }
+    return true;
+}
+
+// RLE pattern format
+// 
+bool PGM::loadRLEPattern(const char *file) {
+    if (!m_owner) {
+        m_owner = true;
+        m_data = 0;
+    }
+    m_width = 0;
+    m_height = 0;
+    
+    FILE *f = fopen(file, "rt");
+    if (!f) {
+        fprintf(stderr, "Unable to open %s for reading.\n", file);
+        return false;
+    }
+    
+    // TODO:
+    return false;
 }
 
 bool PGM::save(const char *file) {

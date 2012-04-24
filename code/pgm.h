@@ -23,15 +23,23 @@ public:
     PGM(unsigned int width, unsigned int height, uint8_t white, uint8_t *data);
     ~PGM();
     
-    bool load(const char *file);
-    bool save(const char *file);
-    
-    void recode(const std::map<uint8_t, uint8_t>& m);
-    
+    // basic PGM data
     unsigned int width() const;
     unsigned int height() const;
     uint8_t white() const;
     uint8_t* data() const;
+    
+    // basic PGM load/save (binary encoding, max 1 byte per pixel)
+    bool load(const char *file);
+    bool save(const char *file);
+    
+    // change colors
+    void recode(const std::map<uint8_t, uint8_t>& m);
+    
+    // extra loading filters for CA simulation
+    bool loadPattern(const char *file);
+    bool loadRLEPattern(const char *file);
+    bool loadWirePattern(const char *file);
     
 private:
     bool m_owner;
