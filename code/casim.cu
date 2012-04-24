@@ -333,82 +333,90 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
 }
 
 enum {
-    kFilterCacheSize = 256,
-    kWarpSize = 32
+    kMaxSharedSize = 512
 };
 
-// fused sort/filter of the worklist
-// NOTE: REQUIRES sz < kFilterCacheSize
-__global__ void kernelSortFilterWorkList(uint32_t *iwork, uint32_t *owork, int sz) {
-    __shared__ int filter[kFilterCacheSize];
-    __shared__ uint64_t values[kFilterCacheSize];
+// require n < kMaxSharedSize
+__global__ void sortFilterShared(uint64_t *in, uint64_t *out, uint32_t n) {
+    unsigned int msb = 32 - __clz(n);
+    unsigned int lsb = __ffs(n);
+    unsigned int p2n = lsb == msb ? n : 1 << msb;
     
-    uint64_t val;
+    __shared__ uint64_t local[kMaxSharedSize];
+    __shared__ unsigned int filter[kMaxSharedSize];
     
-    if (threadIdx.x >= sz)
+    unsigned int tidx = threadIdx.x;
+    
+    if (tidx >= n)
         return;
     
-    // cooperative load
-    val = reinterpret_cast<uint64_t*>(iwork)[threadIdx.x];
-    values[threadIdx.x] = val;
-    filter[threadIdx.x] = -1;
+    local[tidx] = in[tidx];
     
-    __syncthreads();
-    
-    // lockstep position determination
-    int position = 0;
-    for (int i = 0; i < sz; ++i) {
-        if (val > values[i])
-            ++position;
+    for (unsigned int size = 2; size <= p2n; size <<= 1) {
+        unsigned int stride = size / 2;
+        unsigned int offstr = (stride - 1);
+        __syncthreads();
+        unsigned int pos = 2 * tidx - (tidx & (stride - 1));
+        if (pos + stride < n) {
+            uint64_t a = local[pos +      0], b = local[pos + stride];
+            if (a > b) {
+                local[pos +      0] = b;
+                local[pos + stride] = a;
+            }
+        }
+        stride >>= 1;
+        for(; stride > 0; stride >>= 1){
+            __syncthreads();
+            unsigned int pos = 2 * tidx - (tidx & (stride - 1));
+            if ((tidx & offstr) >= stride && (pos < n)) {
+                uint64_t a = local[pos - stride], b = local[pos +      0];
+                if (a > b) {
+                    local[pos - stride] = b;
+                    local[pos +      0] = a;
+                }
+            }
+        }
     }
     
-    // there may be duplicates in the input array so the positions will be off
-    // run a prefix sum on the filter array to get the number of gaps before a
-    // given position
-    filter[position] = 0;
     __syncthreads();
     
-    int offset = filter[threadIdx.x];
+    uint64_t val = local[tidx];
+    unsigned int offset = tidx && val == local[tidx - 1] ? 1 : 0;
+    filter[tidx] = offset;
+    
+    __syncthreads();
     
     // simple block-wide inclusive prefix sum
     // TODO: use more efficient impl?
     #define PREFIX_SUM_B(N, V, A, S) \
-    if (S > N) { if (threadIdx.x >= N) { V += A[threadIdx.x - N]; } __syncthreads(); A[threadIdx.x] = V; __syncthreads(); }
+    if (S > N) { if (tidx >= N) { V += A[tidx - N]; } __syncthreads(); A[tidx] = V; __syncthreads(); }
     
     // enforce lockstep between warps
-    PREFIX_SUM_B(1, offset, filter, sz)
-    PREFIX_SUM_B(2, offset, filter, sz)
-    PREFIX_SUM_B(4, offset, filter, sz)
-    PREFIX_SUM_B(8, offset, filter, sz)
-    PREFIX_SUM_B(16, offset, filter, sz)
-    PREFIX_SUM_B(32, offset, filter, sz)
-    PREFIX_SUM_B(64, offset, filter, sz)
-    PREFIX_SUM_B(128, offset, filter, sz)
+    PREFIX_SUM_B(1, offset, filter, n)
+    PREFIX_SUM_B(2, offset, filter, n)
+    PREFIX_SUM_B(4, offset, filter, n)
+    PREFIX_SUM_B(8, offset, filter, n)
+    PREFIX_SUM_B(16, offset, filter, n)
+    PREFIX_SUM_B(32, offset, filter, n)
+    PREFIX_SUM_B(64, offset, filter, n)
+    PREFIX_SUM_B(128, offset, filter, n)
+    PREFIX_SUM_B(256, offset, filter, n)
     
     #undef PREFIX_SUM_B
     
-    // fix position to account for duplicate removal (offset is negative)
-    position += filter[position];
-    
-    // cooperative store (w/ duplicate removal by design)
-    // relies on he spec re concurrent shared mem write : all writes to a given
-    // position have the same value so which succeeds doesn't affect correctness
-    values[position] = val;
+    local[tidx - filter[tidx]] = val;
+    n -= filter[n-1];
     
     __syncthreads();
     
-    // fix size to account for duplicate removal
-    sz += filter[sz-1];
+    if (tidx >= n)
+        return;
     
-    // store filtered values to output array
-    if (threadIdx.x < sz) {
-        val = values[threadIdx.x];
-        reinterpret_cast<uint64_t*>(owork)[threadIdx.x] = val;
-    }
+    out[tidx] = local[tidx];
     
     // CPU need to know the size of the filtered array
-    if (threadIdx.x == 0)
-        *caParams.workOffset = sz;
+    if (tidx == 0)
+        *caParams.workOffset = n;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -574,10 +582,12 @@ void CASim::step(int n) {
         // TODO: find best empirical threshold
         const uint32_t threshold = 1024;
         tref = CycleTimer::currentSeconds();
-        if (wNext < kFilterCacheSize) {
+        if (wNext < kMaxSharedSize) {
             // fits in shared memory : super-fast fused sort/filter
             
-            kernelSortFilterWorkList<<<1, wNext>>>(work1, work0, wNext);
+            sortFilterShared<<<1, wNext>>>(reinterpret_cast<uint64_t*>(work1),
+                                           reinterpret_cast<uint64_t*>(work0),
+                                           wNext);
             
             cudaDeviceSynchronize();
             cudaMemcpy(&wAmount, workOffset, sizeof(uint32_t), cudaMemcpyDeviceToHost);
@@ -726,13 +736,8 @@ bool CASim::setCells(unsigned int width, unsigned int height, uint8_t max,
     cudaMemset(cell1+(height+1)*pitch, 0, width);
     
     // reset padding columns
-    if (wpad) {
-//         for (int i = 0; i < height+2; ++i) {
-//             cudaMemset(cell0+i*pitch+width, 0, wpad);
-//             cudaMemset(cell1+i*pitch+width, 0, wpad);
-//         }
+    if (wpad)
         cudaMemset2D(cell0+width, pitch, 0, wpad, height+2);
-    }
     
     // prepare initial worklist
     dim3 blockDim(128, 1);
