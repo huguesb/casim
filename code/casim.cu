@@ -112,35 +112,39 @@ inline __device__ uint32_t CAUpdateCore(uint32_t mid, uint8_t *sp) {
         
     } else {
         // Life-like
-        const int S = caParams.S, B = caParams.B;
+        //const int S = caParams.S, B = caParams.B;
         
         sum =
             sp[-kMacroCellCacheStride-1] + atop + btop +
             sp[                      -1]        + bmid +
             sp[ kMacroCellCacheStride-1] + abot + bbot;
         
-        nval |= ((1 << sum) & (amid ? S : B)) ? 1 : 0;
+        //nval |= ((1 << sum) & (amid ? S : B)) ? 1 : 0;
+        nval |= ((1 << sum) & (&caParams.B)[amid]) ? 1 : 0;
         
         sum =
             atop + btop + ctop +
             amid        + cmid +
             abot + bbot + cbot;
         
-        nval |= ((1 << sum) & (bmid ? S : B)) ? (1 << 8) : 0;
+//         nval |= ((1 << sum) & (bmid ? S : B)) ? (1 << 8) : 0;
+        nval |= ((1 << sum) & (&caParams.B)[bmid]) ? (1 << 8) : 0;
         
         sum =
             btop + ctop + dtop +
             bmid        + dmid +
             bbot + cbot + dbot;
         
-        nval |= ((1 << sum) & (cmid ? S : B)) ? (1 << 16) : 0;
+//         nval |= ((1 << sum) & (cmid ? S : B)) ? (1 << 16) : 0;
+        nval |= ((1 << sum) & (&caParams.B)[cmid]) ? (1 << 16) : 0;
         
         sum =
             ctop + dtop + sp[-kMacroCellCacheStride+4] +
             cmid        + sp[                       4] +
             cbot + dbot + sp[ kMacroCellCacheStride+4];
         
-        nval |= ((1 << sum) & (dmid ? S : B)) ? (1 << 24) : 0;
+//         nval |= ((1 << sum) & (dmid ? S : B)) ? (1 << 24) : 0;
+        nval |= ((1 << sum) & (&caParams.B)[dmid]) ? (1 << 24) : 0;
     }
     return nval;
 }
@@ -155,6 +159,9 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
         mid = *reinterpret_cast<uint32_t*>(ip);
         *reinterpret_cast<uint32_t*>(sp) = mid;
         
+        // ensure coalescable accesses are coalesced
+        __syncthreads();
+        
         // load left and right boundary cells
         if (threadIdx.x == 0) {
             sp[-1] = col == 0 ? 0 : ip[-1];
@@ -162,10 +169,17 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
             sp[4] = col == caParams.width-4 ? 0 : ip[4];
         }
         
+        // ensure coalescable accesses are coalesced
+        __syncthreads();
+        
         // load top and bottom boundary cells
         if (threadIdx.y == 0) {
             ip -= pitch;
             *reinterpret_cast<uint32_t*>(sp-kMacroCellCacheStride) = *reinterpret_cast<uint32_t*>(ip);
+            
+            // ensure coalescable accesses are coalesced
+            __syncthreads();
+            
             if (threadIdx.x == 0) {
                 sp[-kMacroCellCacheStride-1] = col == 0 ? 0 : ip[-1];
             } else if (threadIdx.x == blockDim.x-1) {
@@ -174,14 +188,22 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
         } else if (threadIdx.y == blockDim.y-1) {
             ip += pitch;
             *reinterpret_cast<uint32_t*>(sp+kMacroCellCacheStride) = *reinterpret_cast<uint32_t*>(ip);
+            
+            // ensure coalescable accesses are coalesced
+            __syncthreads();
+            
             if (threadIdx.x == 0) {
                 sp[kMacroCellCacheStride-1] = col == 0 ? 0 : ip[-1];
             } else if (threadIdx.x == blockDim.x-1) {
                 sp[kMacroCellCacheStride+4] = col == caParams.width-4 ? 0 : ip[4];
             }
         }
+        
     } else {
         *reinterpret_cast<uint32_t*>(sp) = mid = 0;
+        
+        // ensure coalescable accesses are coalesced
+        __syncthreads();
         
         // load left and right boundary cells
         if (threadIdx.x == 0) {
@@ -189,6 +211,10 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
         } else if (threadIdx.x == blockDim.x-1) {
             sp[4] = 0;
         }
+        
+        // ensure coalescable accesses are coalesced
+        __syncthreads();
+        __syncthreads();
     }
     return mid;
 }
@@ -217,6 +243,10 @@ __global__ void kernelCAUpdateNaive(uint8_t *in,  uint8_t *out, size_t pitch) {
     
     uint32_t nval = CAUpdateCore<T>(mid, sp);
     uint8_t *op = out + row * pitch + col * 4;
+    
+    // ensure coalescing
+    __syncthreads();
+    
     *reinterpret_cast<uint32_t*>(op) = nval;
 }
 
@@ -269,6 +299,10 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
     // update cells
     uint32_t nval = CAUpdateCore<T>(mid, sp);
     uint8_t *op = out + row * pitch + col * 4;
+    
+    // ensure coalescing
+    __syncthreads();
+    
     *reinterpret_cast<uint32_t*>(op) = nval;
     
     // determine modification
@@ -540,6 +574,7 @@ void CASim::step(int n) {
         else
             kernelCAUpdateNaive<CARule::LifeLike><<<updateGridDim, updateBlockDim>>>(
                 scell + pitch, dcell + pitch, pitch);
+        cudaDeviceSynchronize();
         
 #else
         // large worklists lead to significant overhead...
