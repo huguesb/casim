@@ -159,9 +159,6 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
         mid = *reinterpret_cast<uint32_t*>(ip);
         *reinterpret_cast<uint32_t*>(sp) = mid;
         
-        // ensure coalescable accesses are coalesced
-        __syncthreads();
-        
         // load left and right boundary cells
         if (threadIdx.x == 0) {
             sp[-1] = col == 0 ? 0 : ip[-1];
@@ -169,16 +166,10 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
             sp[4] = col == caParams.width-4 ? 0 : ip[4];
         }
         
-        // ensure coalescable accesses are coalesced
-        __syncthreads();
-        
         // load top and bottom boundary cells
         if (threadIdx.y == 0) {
             ip -= pitch;
             *reinterpret_cast<uint32_t*>(sp-kMacroCellCacheStride) = *reinterpret_cast<uint32_t*>(ip);
-            
-            // ensure coalescable accesses are coalesced
-            __syncthreads();
             
             if (threadIdx.x == 0) {
                 sp[-kMacroCellCacheStride-1] = col == 0 ? 0 : ip[-1];
@@ -188,9 +179,6 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
         } else if (threadIdx.y == blockDim.y-1) {
             ip += pitch;
             *reinterpret_cast<uint32_t*>(sp+kMacroCellCacheStride) = *reinterpret_cast<uint32_t*>(ip);
-            
-            // ensure coalescable accesses are coalesced
-            __syncthreads();
             
             if (threadIdx.x == 0) {
                 sp[kMacroCellCacheStride-1] = col == 0 ? 0 : ip[-1];
@@ -202,19 +190,12 @@ inline __device__ uint32_t loadCells(int row, int col, uint8_t *sp, uint8_t *ip,
     } else {
         *reinterpret_cast<uint32_t*>(sp) = mid = 0;
         
-        // ensure coalescable accesses are coalesced
-        __syncthreads();
-        
         // load left and right boundary cells
         if (threadIdx.x == 0) {
             sp[-1] = 0;
         } else if (threadIdx.x == blockDim.x-1) {
             sp[4] = 0;
         }
-        
-        // ensure coalescable accesses are coalesced
-        __syncthreads();
-        __syncthreads();
     }
     return mid;
 }
@@ -243,10 +224,6 @@ __global__ void kernelCAUpdateNaive(uint8_t *in,  uint8_t *out, size_t pitch) {
     
     uint32_t nval = CAUpdateCore<T>(mid, sp);
     uint8_t *op = out + row * pitch + col * 4;
-    
-    // ensure coalescing
-    __syncthreads();
-    
     *reinterpret_cast<uint32_t*>(op) = nval;
 }
 
@@ -299,10 +276,6 @@ __global__ void kernelCAUpdateWorkList(uint32_t *iwork, uint32_t *owork,
     // update cells
     uint32_t nval = CAUpdateCore<T>(mid, sp);
     uint8_t *op = out + row * pitch + col * 4;
-    
-    // ensure coalescing
-    __syncthreads();
-    
     *reinterpret_cast<uint32_t*>(op) = nval;
     
     // determine modification
