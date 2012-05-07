@@ -1,0 +1,97 @@
+#!/bin/bash
+
+#
+# Small script to run VHDL simulation using GHDL and gtkwave
+#
+# NB : this script assume that all required VHDL files have
+# been imported in the workdir already.
+#
+
+function usage () {
+    cat << EOF
+Usage: $(basename $0) [options] entity time
+
+Options:
+	--work, -w <path>  GHDL workdir (.work)
+	-s <file>          GtkWave save file
+	--disp, -d         Display resulting wave file in GtkWave
+	--verbose, -v      Verbose mode
+	--help, -h         Display this help
+EOF
+}
+
+ghdl_options="--warn-binding --warn-reserved --warn-library --warn-vital-generic --warn-delayed-checks --warn-body --warn-specs --warn-unused"
+
+entity=""
+time=""
+verbose=0
+save=""
+work=".work"
+disp=0
+
+while test $# -ne 0; do
+    case "$1" in
+        "--help"|"-h")
+            usage
+            exit 0
+            ;;
+        "--verbose"|"-v")
+            verbose=1
+            ;;
+        "--disp"|"-d")
+            disp=1
+            ;;
+        "--work"|"-w")
+            shift
+            work="$1"
+            ;;
+        "-s")
+            shift
+            save="$1"
+            ;;
+        *)
+            if [ "$entity" = "" ]; then
+                entity="$1"
+            elif [ "$time" = "" ]; then
+                time="$1"
+            else
+                usage
+                exit 1
+            fi
+            ;;
+    esac
+    shift
+done
+
+run_cmd () {
+    if [ "$verbose" = "1" ]; then
+        echo "$@"
+    fi
+    "$@"
+}
+
+view_wave () {
+    if [ "$disp" = "1" ]; then
+		if [ "$save" = "" ]; then
+			run_cmd gtkwave "$entity".vcd
+		else
+			run_cmd gtkwave "$entity".vcd "$save"
+		fi
+	fi
+}
+
+if [ "$entity" = "" ] || [ "$time" = "" ]; then
+    usage
+    exit 1
+fi
+
+mkdir -p "$work"
+
+#
+# to use std_logic_arith add : --ieee=synopsys -fexplicit
+# (nb : this is not a good practice since these packages are vendor-specific)
+#
+run_cmd ghdl -m --ieee=synopsys -fexplicit --workdir="$work" $ghdl_options "$entity" 2>&1 &&
+run_cmd ./"$entity" --stop-time="$time" --vcd="$entity".vcd &&
+view_wave
+
