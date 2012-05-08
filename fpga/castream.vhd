@@ -9,6 +9,14 @@
 library ieee;
 use ieee.std_logic_1164.all;
 
+-- CA transition at macrocell level (restricted to Life-like for now)
+-- IE : input enable
+-- LC,RC : Left and right boundary condition respectively
+-- I : macrocell state row
+-- O : next macrocell state row
+--
+-- 2 clock cycle setup
+-- 1 row/cycle in steady state [1 cycle latency when all neighbours are avail]
 entity castream is
     generic(
         width : natural := 16

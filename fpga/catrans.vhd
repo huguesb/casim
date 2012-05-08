@@ -10,6 +10,12 @@ library ieee;
 use ieee.std_logic_1164.all;
 use ieee.numeric_std.all;
 
+-- Core CA transition function (restricted to Life-like for now)
+-- I : cell state
+-- N : Moore neighbourhood at current generation
+-- O : next cell state
+--
+-- 1 clock cycle latency
 entity catrans is
     Port(
         CLK, R : in std_logic;
