@@ -61,7 +61,7 @@ architecture Behavioral of castream is
     signal lvl : regBarray(3 downto 0);
     signal mix : regWarray(7 downto 0);
 begin
-    lvl(0) <= LC & I & RC;
+    lvl(0) <= RC & I & LC;
     
     cMid : reg
         generic map(width => width+2)
