@@ -160,7 +160,7 @@ architecture Behavioral of caupdate is
     
     -- coords : cache, fetch position, ...
     signal cX, sfX, baseX : std_logic_vector(xbwidth-1 downto 0);
-    signal cY, sfY, nfY, ssY, firstY, baseY : std_logic_vector(ybwidth-1 downto 0);
+    signal cY, sfY, nfY, ssY, firstY, baseY, offY : std_logic_vector(ybwidth-1 downto 0);
     
     -- cached cell contents
     signal ccell, ncell : regWarray(height+1 downto 0);
@@ -168,7 +168,7 @@ architecture Behavioral of caupdate is
     -- macrocell row to send to stream unit (w/ boundary)
     signal crow : std_logic_vector(datawidth+1 downto 0);
     
-    signal sreqo : std_logic;
+    signal sLastY, Rridx, sRDY, sRDYr, sreqo : std_logic;
 begin
     -- cell location cache
     ccX : reg
@@ -192,7 +192,7 @@ begin
         );
     
     -- register enable flag
-    Enext <= NXTY and not ELP;
+    Enext <= NXTY;
     
     -- fetch coordinate
     cfY : reg
@@ -220,7 +220,16 @@ begin
     nfetchmask <= (height downto 0 => '0') & '1' when R='1' else
                   rfetchmask(height downto 0) & rfetchmask(height+1);
     
-    Efm <= NXTY or R;
+    rdyEdge : reg1
+        port map(
+            CLK=>CLK,
+            R=>'0',
+            E=>'1',
+            D=>sRDY,
+            Q=>sRDYr
+        );
+    
+    Efm <= NXTY or R or (sRDY and not sRDYr);
     
     cfm : reg
         generic map(width => height+2)
@@ -233,13 +242,14 @@ begin
         );
     
     -- row counter
+    Rridx <= R or sRDY;
     nrowidx <= std_logic_vector(unsigned(rowidx)+1);
     
     crowidx : reg
         generic map(width => 5)
         port map(
             CLK=>CLK,
-            R=>R,
+            R=>Rridx,
             E=>NXTY,
             D=>nrowidx,
             Q=>rowidx
@@ -251,10 +261,11 @@ begin
     
     XHIT <= diffX(1 downto 0) when diffX(xbwidth-1 downto 2)=(xbwidth-3 downto 0=>'0') else "11";
     YHIT <= '1' when diffY=(ybwidth-1 downto 0=>'0') else '0';
-    XBND <= '1' when Y=(ybwidth-1 downto 0=>'0') else '0';
-    YBND <= '1' when X=(xbwidth-1 downto 0=>'0') else '0';
+    YBND <= '1' when Y=(ybwidth-1 downto 0=>'0') else '0';
+    XBND <= '1' when X=(xbwidth-1 downto 0=>'0') else '0';
     
-    LASTY <= '1' when rowidx="10001" else '0';
+    sLastY <= '1' when rowidx="10001" else '0';
+    LASTY <= sLastY;
     
     -- fetch address
     -- TODO: avoid overrun...
@@ -268,7 +279,8 @@ begin
     
     firstY <= Y when YBND='1' else std_logic_vector(unsigned(Y)-1);
     baseY <= firstY when ELP='1' else sfY;
-    nfY <= std_logic_vector(unsigned(baseY)+1);
+    offY <= (offY'length-2 downto 0 => '0') & not ELP;
+    nfY <= std_logic_vector(unsigned(baseY)+unsigned(offY));
     
     ADDRI(addrwidth-1 downto xbwidth) <= nfY when Enext='1' else baseY;
     ADDRI(xbwidth-1 downto 0) <= sfX;
@@ -314,7 +326,7 @@ begin
             R=>R,
             E=>E,
             DISCARD=>DISCARD,
-            RDY=>RDY,
+            RDY=>sRDY,
             DREQI=>DREQI,
             DRDYI=>DRDYI,
             XBND=>XBND,
@@ -329,6 +341,8 @@ begin
             NXTY=>NXTY,   -- 0,+1 (start new row)
             LASTY=>LASTY
         );
+    
+    RDY <= sRDY;
     
     -- data mixing
     
@@ -372,11 +386,7 @@ begin
     -- output results
     -- TODO: throttle input if output takes more than 1cc
     
-    -- 1cc latency : pipe signal through a D flip-flop 
-    
-    DREQO <= NXTY and not rfetchmask(0) and not rfetchmask(1);
-    
-    -- compute store address
+    DREQO <= (NXTY or sRDY) and not rfetchmask(0) and not rfetchmask(1);
     
     ADDRO <= ssY & cX;
     

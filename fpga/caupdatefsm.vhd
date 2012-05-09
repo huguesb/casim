@@ -100,7 +100,7 @@ begin
         );
     
     -- state output
-    process (sState, E, DRDYI)
+    process (sState, E, DRDYI, LASTY)
     begin
         -- default values to avoid latch inference and code duplication
         
