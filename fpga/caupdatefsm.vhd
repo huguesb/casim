@@ -62,23 +62,11 @@ architecture Behavioral of caupdatefsm is
     );
     
     -- state machine
+    -- Manual state encoding for speed and ease of debugging
     signal sState, sNextState, sBaseState : std_logic_vector(1 downto 0);
     
     signal Ebase, Estate : std_logic;
 begin
---     -- generic state switching code
---     process (CLK) 
---     begin 
---         if ( CLK'event and CLK='1' ) then 
---             if ( R='1' ) then
---                 sState <= "00";
---             else
---                 sState <= sNextState;
---             end if;
---         end if;
---     end process;
---     
-    
     cBaseState : reg
         generic map(width=> 2)
         port map(
@@ -102,11 +90,7 @@ begin
     -- state output
     process (sState, E, DRDYI, LASTY)
     begin
-        -- default values to avoid latch inference and code duplication
-        
-        NXTY <= '0';
-        CCR <= '0';
-        CCC <= '0';
+        -- default value to avoid latch inference and code duplication
         
         sNextState <= "00";
         
@@ -121,16 +105,9 @@ begin
                             sNextState <= "11";  -- SFetchC
                         end if;
                     elsif (XBND='1') then
-                        CCC <= '1';
                         sNextState <= "11"; -- SFetchC;
                     else
                         sNextState <= "01"; -- SFetchL;
-                    end if;
-                    
-                    -- reset fetch coordinates
-                    if (YBND='1')then
-                        CCR <= '1';
-                        NXTY <= '1';
                     end if;
                 end if;
                 
@@ -146,8 +123,6 @@ begin
                 
             when "10" => -- SFetchR
                 if (DRDYI='1') then
-                    NXTY <= '1';
-                    
                     if (LASTY='1') then
                         -- macrocell finished
                         sNextState <= "00";
@@ -164,7 +139,11 @@ begin
     
     ELP <= Ebase;
     ELD <= DRDYI and (sState(1) or sState(0));
+    CCC <= Ebase and XBND;
+    CCR <= Ebase and YBND;
     DREQI <= sNextState(1) or sNextState(0);
     RDY <= not sNextState(1) and not sNextState(0);
     NXTX <= not sNextState(1) & not sNextState(0);
+    NXTY <= (Ebase and YBND) or
+            (sState(1) and not sState(0) and DRDYI);
 end Behavioral;

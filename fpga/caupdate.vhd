@@ -133,8 +133,10 @@ architecture Behavioral of caupdate is
     
     type regWarray is array (integer range <>) of std_logic_vector(datawidth-1 downto 0);
     
+    -- bounds check
+    signal XBND, YBND, XBNDHI, YBNDHI : std_logic;
+    
     -- FSM signals
-    signal XBND, YBND : std_logic;
     signal YHIT : std_logic;
     signal XHIT : std_logic_vector(1 downto 0);
     signal CCC, CCR : std_logic; -- CacheClear Col/Row
@@ -147,7 +149,7 @@ architecture Behavioral of caupdate is
     signal RcacheCur, RcacheNext : std_logic_vector(height+1 downto 0);
     
     -- register enable flags
-    signal Enext, Efm : std_logic;
+    signal Enext, Efm, Estream : std_logic;
     signal Ecld : std_logic_vector(height+1 downto 0);
     
     -- helper for cache management
@@ -168,7 +170,12 @@ architecture Behavioral of caupdate is
     -- macrocell row to send to stream unit (w/ boundary)
     signal crow : std_logic_vector(datawidth+1 downto 0);
     
-    signal sLastY, Rridx, sRDY, sRDYr, sreqo : std_logic;
+    signal sLastY, Rridx, sRDY, sRDYr, sFirstRow, sFirstRowP, sreqo : std_logic;
+    
+    -- "managed" memory interface to handle boundary conditions
+    signal sMemReqOutOfBounds, sMemDataOutOfBounds : std_logic;
+    signal sDREQI, sDRDYI : std_logic;
+    signal sDATAI : std_logic_vector((2**dbwidth)-1 downto 0);
 begin
     -- cell location cache
     ccX : reg
@@ -192,7 +199,7 @@ begin
         );
     
     -- register enable flag
-    Enext <= NXTY;
+    Enext <= NXTY or ELP;
     
     -- fetch coordinate
     cfY : reg
@@ -220,16 +227,7 @@ begin
     nfetchmask <= (height downto 0 => '0') & '1' when R='1' else
                   rfetchmask(height downto 0) & rfetchmask(height+1);
     
-    rdyEdge : reg1
-        port map(
-            CLK=>CLK,
-            R=>'0',
-            E=>'1',
-            D=>sRDY,
-            Q=>sRDYr
-        );
-    
-    Efm <= NXTY or R or (sRDY and not sRDYr);
+    Efm <= NXTY or R or (sRDY and not NXTY and not R);
     
     cfm : reg
         generic map(width => height+2)
@@ -242,8 +240,17 @@ begin
         );
     
     -- row counter
-    Rridx <= R or sRDY;
+    Rridx <= R or (sRDYr and not NXTY);
     nrowidx <= std_logic_vector(unsigned(rowidx)+1);
+    
+    cRDY : reg1
+        port map(
+            CLK=>CLK,
+            R=>'0',
+            E=>'1',
+            D=>sRDY,
+            Q=>sRDYr
+        );
     
     crowidx : reg
         generic map(width => 5)
@@ -259,16 +266,40 @@ begin
     diffY <= Y xor cY;
     diffX <= std_logic_vector(unsigned(x) - unsigned(cX));
     
+    -- cache hit test
     XHIT <= diffX(1 downto 0) when diffX(xbwidth-1 downto 2)=(xbwidth-3 downto 0=>'0') else "11";
     YHIT <= '1' when diffY=(ybwidth-1 downto 0=>'0') else '0';
+    
+    -- check for top/left macrocell
     YBND <= '1' when Y=(ybwidth-1 downto 0=>'0') else '0';
     XBND <= '1' when X=(xbwidth-1 downto 0=>'0') else '0';
     
+    -- check for bottom/right macrocell
+    -- TODO: make configurable
+    YBNDHI <= '1' when Y="1111110000" else '0'; -- 1024 - 16 : 1008
+    XBNDHI <= '1' when X="11111" else '0'; -- (1024/32)-1 : 31
+    
+    -- flag to signal last row of macrocell to FSM
     sLastY <= '1' when rowidx="10001" else '0';
     LASTY <= sLastY;
     
+    -- short-circuit memory interface for out-of-bounds access handling
+    sMemReqOutOfBounds <= sDREQI and ((YBNDHI and sLastY) or (XBNDHI and NXTX(0)));
+    
+    memReq : reg1
+        port map(
+            CLK=>CLK,
+            R=>'0',
+            E=>'1',
+            D=>sMemReqOutOfBounds,
+            Q=>sMemDataOutOfBounds
+        );
+    
+    DREQI <= sDREQI and not sMemReqOutOfBounds;
+    sDRDYI <= '1' when sMemReqOutOfBounds='1' else DRDYI;
+    sDATAI <= (others => '0') when sMemDataOutOfBounds='1' else DATAI;
+    
     -- fetch address
-    -- TODO: avoid overrun...
     baseX <= X when ELP='1' else cX;
     
     with NXTX select
@@ -277,16 +308,25 @@ begin
                std_logic_vector(unsigned(baseX) + 1) when "01",
                (others => 'Z')                       when others;
     
+    -- streaming address computation requires some mix of muxes and flip-flops... 
+    cFirstRow : reg1
+        port map(
+            CLK=>CLK,
+            R=>R,
+            E=>'1',
+            D=>sFirstRow,
+            Q=>sFirstRowP
+        );
+    sFirstRow <= ELP or (not NXTY and sFirstRowP);
+    
     firstY <= Y when YBND='1' else std_logic_vector(unsigned(Y)-1);
     baseY <= firstY when ELP='1' else sfY;
-    offY <= (offY'length-2 downto 0 => '0') & not ELP;
-    nfY <= std_logic_vector(unsigned(baseY)+unsigned(offY));
+    nfY <= firstY when ELP='1' else std_logic_vector(unsigned(sfY)+1);
     
     ADDRI(addrwidth-1 downto xbwidth) <= nfY when Enext='1' else baseY;
     ADDRI(xbwidth-1 downto 0) <= sfX;
     
     -- cell data cache
-    
     RcacheCur(0) <= R or CCR or CCC;
     RcacheCur(height+1 downto 1) <= (others => R or CCC);
     
@@ -314,7 +354,7 @@ begin
                 CLK => CLK,
                 R => RcacheNext(idx),
                 E => Ecld(idx),
-                D => DATAI,
+                D => sDATAI,
                 Q => ncell(idx)
             );
     end generate;
@@ -327,8 +367,8 @@ begin
             E=>E,
             DISCARD=>DISCARD,
             RDY=>sRDY,
-            DREQI=>DREQI,
-            DRDYI=>DRDYI,
+            DREQI=>sDREQI,
+            DRDYI=>sDRDYI,
             XBND=>XBND,
             YBND=>YBND,
             YHIT=>YHIT,
@@ -348,25 +388,27 @@ begin
     
     with rowidx select
         crow <=
-            DATAI(0) & ncell( 0) & ccell( 0)(datawidth-1) when "00000",
-            DATAI(0) & ncell( 1) & ccell( 1)(datawidth-1) when "00001",
-            DATAI(0) & ncell( 2) & ccell( 2)(datawidth-1) when "00010",
-            DATAI(0) & ncell( 3) & ccell( 3)(datawidth-1) when "00011",
-            DATAI(0) & ncell( 4) & ccell( 4)(datawidth-1) when "00100",
-            DATAI(0) & ncell( 5) & ccell( 5)(datawidth-1) when "00101",
-            DATAI(0) & ncell( 6) & ccell( 6)(datawidth-1) when "00110",
-            DATAI(0) & ncell( 7) & ccell( 7)(datawidth-1) when "00111",
-            DATAI(0) & ncell( 8) & ccell( 8)(datawidth-1) when "01000",
-            DATAI(0) & ncell( 9) & ccell( 9)(datawidth-1) when "01001",
-            DATAI(0) & ncell(10) & ccell(10)(datawidth-1) when "01010",
-            DATAI(0) & ncell(11) & ccell(11)(datawidth-1) when "01011",
-            DATAI(0) & ncell(12) & ccell(12)(datawidth-1) when "01100",
-            DATAI(0) & ncell(13) & ccell(13)(datawidth-1) when "01101",
-            DATAI(0) & ncell(14) & ccell(14)(datawidth-1) when "01110",
-            DATAI(0) & ncell(15) & ccell(15)(datawidth-1) when "01111",
-            DATAI(0) & ncell(16) & ccell(16)(datawidth-1) when "10000",
-            DATAI(0) & ncell(17) & ccell(17)(datawidth-1) when "10001",
+            sDATAI(0) & ncell( 0) & ccell( 0)(datawidth-1) when "00000",
+            sDATAI(0) & ncell( 1) & ccell( 1)(datawidth-1) when "00001",
+            sDATAI(0) & ncell( 2) & ccell( 2)(datawidth-1) when "00010",
+            sDATAI(0) & ncell( 3) & ccell( 3)(datawidth-1) when "00011",
+            sDATAI(0) & ncell( 4) & ccell( 4)(datawidth-1) when "00100",
+            sDATAI(0) & ncell( 5) & ccell( 5)(datawidth-1) when "00101",
+            sDATAI(0) & ncell( 6) & ccell( 6)(datawidth-1) when "00110",
+            sDATAI(0) & ncell( 7) & ccell( 7)(datawidth-1) when "00111",
+            sDATAI(0) & ncell( 8) & ccell( 8)(datawidth-1) when "01000",
+            sDATAI(0) & ncell( 9) & ccell( 9)(datawidth-1) when "01001",
+            sDATAI(0) & ncell(10) & ccell(10)(datawidth-1) when "01010",
+            sDATAI(0) & ncell(11) & ccell(11)(datawidth-1) when "01011",
+            sDATAI(0) & ncell(12) & ccell(12)(datawidth-1) when "01100",
+            sDATAI(0) & ncell(13) & ccell(13)(datawidth-1) when "01101",
+            sDATAI(0) & ncell(14) & ccell(14)(datawidth-1) when "01110",
+            sDATAI(0) & ncell(15) & ccell(15)(datawidth-1) when "01111",
+            sDATAI(0) & ncell(16) & ccell(16)(datawidth-1) when "10000",
+            sDATAI(0) & ncell(17) & ccell(17)(datawidth-1) when "10001",
             (others => 'Z') when others;
+    
+    Estream <= (NXTY or sRDY) and not R;
     
     -- cell transition stream
     cStream: for idx in 0 to numstream-1 generate
@@ -375,7 +417,7 @@ begin
             port map(
                 CLK=>CLK,
                 R=>R,
-                IE=>NXTY,
+                IE=>Estream,
                 LC=>crow(idx*streamwidth),
                 RC=>crow((idx+1)*streamwidth+1),
                 I=>crow((idx+1)*streamwidth downto idx*streamwidth+1),
@@ -385,8 +427,7 @@ begin
     
     -- output results
     -- TODO: throttle input if output takes more than 1cc
-    
-    DREQO <= (NXTY or sRDY) and not rfetchmask(0) and not rfetchmask(1);
+    DREQO <= Estream and not rfetchmask(0) and not rfetchmask(1);
     
     ADDRO <= ssY & cX;
     
