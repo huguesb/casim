@@ -2,8 +2,8 @@
 ** Copyright (c) 2012 Hugues Bruant <hugues@cmu.edu>
 ** All rights reserved.
 **
-** This file may be used under the terms of the GNU General Public License
-** version 3 as published by the Free Software Foundation.
+** This file is part of a school project and licensed under the terms of FreeBSD
+** license (2-clause BSD also refered to as Simplified BSD License)
 **
 ** This file is provided AS IS with NO WARRANTY OF ANY KIND, INCLUDING THE
 ** WARRANTY OF DESIGN, MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
